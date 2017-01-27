@@ -2,9 +2,6 @@
 //
 //                     The LLVM Compiler Infrastructure
 //
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
 //===----------------------------------------------------------------------===//
 //
 //
@@ -63,9 +60,7 @@ namespace {
   public:
     Relation(){}
 
-    // We may have to do something different…
     Relation(PHINode *PHI, Loop *L, bool WantIn){ 
-      // In which case we consider I ?
       instructions.insert(PHI);
       addPropag(PHI);
       DEBUG(dbgs() << "\tNew Instruction\t" << " = \t" << PHI << '\n');
@@ -73,10 +68,6 @@ namespace {
       bool onlyConst = true;
       for(auto OP = PHI->op_begin(), E = PHI->op_end(); OP!=E;){
         Value *v = OP->get();
-        DEBUG(dbgs() << "\t\toperand \t" << v->getName());
-        DEBUG(dbgs() << "\t → \t" << v << '\n');
-        DEBUG(dbgs() << "\t Block → \t" << PHI->getIncomingBlock(i)->getName()
-              << '\n');
         bool isIn = (PHI->getIncomingBlock(i) == L->getLoopPreheader());
         // Take initialisation into account !
         if(WantIn){
@@ -125,8 +116,6 @@ namespace {
         bool onlyConst = true;
         for(auto OP = I->op_begin(), E = I->op_end(); OP!=E;){
           Value *v = OP->get();
-          DEBUG(dbgs() << "\t\toperand \t" << v->getName());
-          DEBUG(dbgs() << "\t → \t" << v << '\n');
           if(!isa<Constant>(v)){
             addPropag(v);
             addDependence(v,I);
@@ -278,7 +267,6 @@ namespace {
     /// Composition with r2
     /// 
     Relation* composition(Relation* r2){
-      /* DEBUG(dbgs() << " Composition is called… " << '\n'); */
       if(variables.empty())
         return r2;
       if(r2->variables.empty())
@@ -289,14 +277,8 @@ namespace {
       for(auto D2 = r2->dep.begin(), D2E = r2->dep.end(); D2 != D2E; ++D2){
         Value* X2 = D2->first;
         VSet spt2 = D2->second;
-        /* DEBUG(dbgs() << " Composition de "  << '\t' << X2->getName() << ":"); */
-        /* DEBUG(printValues(spt2,dbgs())); */
-        /* DEBUG(dbgs() << " Mes variables "  << '\n'); */
-        /* DEBUG(printValues(variables,dbgs())); */
         if(!variables.count(X2)){ // Not in r1 variables
-          /* DEBUG(dbgs() << " X2 not in R1 vars…" << '\n'); */
           comp->addDependencies(X2,spt2); // All dep are taken
-          /* DEBUG(printValues(comp->dep[X2],dbgs())); */
         }
         else if(propag.count(X2)) // In propag
           comp->addDependencies(X2,spt2); // All dep are taken
@@ -395,7 +377,6 @@ namespace {
     VSet variables;
     VSet propag;
     DepMap dep;
-    /* DenseMap<Value*,VSet> dep; */
     VSet init;
 
   }; // End Relation
@@ -452,12 +433,10 @@ static void dumpMapDegOfBB(MapDeg* mapDeg, BasicBlock* BB, raw_ostream &OS){
 // Return Relation composed for the loop condition
 static Relation* getWhileCondRelations(Loop* L, MapRel* mapRel){
     BasicBlock* BB = L->getHeader();
-    DEBUG(dbgs() << "In getWhileCondRelations : " << '\n');
     Relation *RB = new Relation(BB);
     bool hasRCMP = false;
     for (BasicBlock::iterator II = BB->end(), E = BB->begin(); II != E;) {
       Instruction &I = *--II;
-      DEBUG(dbgs() << "Treating: " << I << " … " << '\n');
 
       if (isa<CmpInst>(&I)) {
         if(hasRCMP){
@@ -467,7 +446,6 @@ static Relation* getWhileCondRelations(Loop* L, MapRel* mapRel){
         Relation *RCMP = new Relation(&I);
         // Save relation with instruction
         (*mapRel)[&I] = RCMP;
-        DEBUG(RCMP->dump(dbgs()));
         RB = RCMP->composition(RB);
         hasRCMP = true;
       } 
@@ -482,10 +460,7 @@ static Relation* getWhileCondRelations(Loop* L, MapRel* mapRel){
           Relation *RI = new Relation(&I);
           // Save relation with instruction
           (*mapRel)[&I] = RI;
-          DEBUG(RI->dump(dbgs()));
-          DEBUG(dbgs() << " Composition…" << '\n');
           RB = RI->composition(RB);
-          DEBUG(RB->dump(dbgs()));
       }
 
       // We've reached all the conditions computations
@@ -503,11 +478,9 @@ static Relation* getWhileCondRelations(Loop* L, MapRel* mapRel){
 static Relation* getPHIRelations(Loop* L, MapDeg* mapDeg, MapRel* mapRel,
                                  std::vector<Value*> *OC, bool WantIn){
     BasicBlock* BB = L->getHeader();
-    DEBUG(dbgs() << "In getPHIRelations : " << '\n');
     Relation *RB = new Relation(BB);
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E;) {
       Instruction &I = *II++;
-      DEBUG(dbgs() << "Treating: " << I << " … " << '\n');
 
       if (PHINode *PHI = dyn_cast<PHINode>(&I)) {
         Relation *RI = new Relation(PHI,L,WantIn);
@@ -515,11 +488,8 @@ static Relation* getPHIRelations(Loop* L, MapDeg* mapDeg, MapRel* mapRel,
         (*mapRel)[&I] = RI;
         if(WantIn)
           (*mapDeg)[&I] = 0;
-        DEBUG(RI->dump(dbgs()));
-        DEBUG(dbgs() << " Composition…" << '\n');
         OC->push_back(&I);
         RB = RB->composition(RI);
-        DEBUG(RB->dump(dbgs()));
       }
     }//End of For II in BB
     if(RB->getInstructions().empty())
@@ -531,20 +501,15 @@ static Relation* getPHIRelations(Loop* L, MapDeg* mapDeg, MapRel* mapRel,
 // Return Relation composed for the given BasicBlock FIXME Polymorphism!
 static Relation* getPHIRelations(Loop* L, MapRel* mapRel, bool WantIn){
     BasicBlock* BB = L->getHeader();
-    DEBUG(dbgs() << "In getPHIRelations : " << '\n');
     Relation *RB = new Relation(BB);
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E;) {
       Instruction &I = *II++;
-      DEBUG(dbgs() << "Treating: " << I << " … " << '\n');
 
       if (PHINode *PHI = dyn_cast<PHINode>(&I)) {
         Relation *RI = new Relation(PHI,L,WantIn);
         // Save relation with instruction
         (*mapRel)[&I] = RI;
-        DEBUG(RI->dump(dbgs()));
-        DEBUG(dbgs() << " Composition…" << '\n');
         RB = RB->composition(RI);
-        DEBUG(RB->dump(dbgs()));
       }
     }//End of For II in BB
     if(RB->getInstructions().empty())
@@ -654,32 +619,25 @@ static Relation* computeRelation(BasicBlock* BB, MapDeg* mapDeg , MapRel*
     Relation *RB = new Relation(BB);
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E;) {
       Instruction &I = *II++;
-      DEBUG(dbgs() << "Treating: " << I << " … " << '\n');
 
       if (!canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo))
-        DEBUG(dbgs() << " canNotSinkOrHoistInst " << '\n');
-      if (!isSafeToExecuteUnconditionally( //TODO ça il faut voir …
+      if (!isSafeToExecuteUnconditionally( 
           I, DT, CurLoop, SafetyInfo,
           CurLoop->getLoopPreheader()->getTerminator()))
-        DEBUG(dbgs() << " isNotSafeToExecuteUnconditionnally " << '\n');
 
       if (canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
-          isSafeToExecuteUnconditionally( //TODO ça il faut voir …
+          isSafeToExecuteUnconditionally( 
             I, DT, CurLoop, SafetyInfo,
             CurLoop->getLoopPreheader()->getTerminator()))
         (*mapDeg)[&I]=0;
       else (*mapDeg)[&I]=-1;
       OC->push_back(&I);
-      DEBUG(dbgs() << "(*mapDeg)[&I]= " << (*mapDeg)[&I] << '\n');
 
       if(!(*mapDeg)[&I]){
         Relation *RI = new Relation(&I);
         // Save relation with instruction
         (*mapRel)[&I] = RI;
-        DEBUG(RI->dump(dbgs()));
-        DEBUG(dbgs() << " Composition…" << '\n');
         RB = RB->composition(RI);
-        DEBUG(RB->dump(dbgs()));
       }
     }//End of For II in BB
     return RB;
@@ -687,24 +645,18 @@ static Relation* computeRelation(BasicBlock* BB, MapDeg* mapDeg , MapRel*
 
 // Dinamically computes the invariance degrees
 static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *DT){
-  DEBUG(dbgs() << "\nINFO… " << I << " Computation degree…" << '\n');
   if((*mapDeg)[I]){
-    DEBUG(dbgs() << " Already in mapDeg " << '\n');
     return (*mapDeg)[I];
   }
   else{
     (*mapDeg)[I]=-1;
     if(!mapRel->count(I)){
-      DEBUG(dbgs() << "\nINFO… " << I << " has not been visited" << '\n');
       (*mapDeg)[I]=0;
       return 0;
     }
     else{
       Relation* RI = (*mapRel)[I];
-      DEBUG(dbgs() << " Relation found: " << '\n');
-      DEBUG(RI->dump(dbgs()));
       if(RI->getDep().empty()){ // Empty dep
-        DEBUG(dbgs() << " No dependence ");
         (*mapDeg)[I]=1;
         return 1;
       }
@@ -712,7 +664,6 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
         Value* instMax;
         int degMax=-1;
         VSet inInst = RI->getIn();
-        DEBUG(dbgs() << " Compute deg on dependencies ");
         for (auto VV = inInst.begin(), E = inInst.end(); VV != E; ++VV) {
           Value* V = *VV;
           (*mapDeg)[I]=computeDeg(mapDeg,V,mapRel,DT);
@@ -720,11 +671,6 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
             degMax=(*mapDeg)[I];
             instMax = V;
         }
-        // Bof! FIXME
-        /* if(BasicBlock *BB = dyn_cast<BasicBlock>(I)) */
-        /*   Instruction *II = BB->getTerminator(); */
-        /* if(BasicBlock *BM = dyn_cast<BasicBlock>(instMax)) */
-        /*   Instruction *IM = BM->getTerminator(); */
         if (Instruction *II = dyn_cast<Instruction>(I)) {
           if (Instruction *IM = dyn_cast<Instruction>(instMax)) {
             if(degMax!=-1 && DT->dominates(II,IM)) // I avant instMax
@@ -766,18 +712,15 @@ static Relation* computeRelationBodyLoop(DomTreeNode *N, Relation *RPHI, MapDeg*
                                          TargetLibraryInfo *TLI, Loop *CurLoop,
                                          AliasSetTracker *CurAST, LoopSafetyInfo
                                          *SafetyInfo, DependenceInfo *DI) {
-  DEBUG(dbgs() << "computeRelationBodyLoop is called… " << '\n');
   // Verify inputs.
   assert(N != nullptr && AA != nullptr && LI != nullptr && DT != nullptr &&
          CurLoop != nullptr && CurAST != nullptr && SafetyInfo != nullptr &&
          "Unexpected input to computeRelationBodyLoop");
 
     BasicBlock *BB = N->getBlock();
-    DEBUG(dbgs() << "Analysis of block " << BB->getName() << " → " << BB << '\n');
 
   // If this subregion is not in the top level loop at all, exit.
   if (!CurLoop->contains(BB)){
-    // Here we should add conditions and phi's dependencies
     return nullptr;
   }
 
@@ -787,18 +730,11 @@ static Relation* computeRelationBodyLoop(DomTreeNode *N, Relation *RPHI, MapDeg*
   // Only need to process the contents of this block if it is not part of a
   // subloop (which would already have been processed).
   bool Changed = false;
-  /* const std::vector<DomTreeNode *> &Children = N->getChildren(); */
   const std::vector<BasicBlock *> &Children = CurLoop->getBlocks();
-  // Put Loop ref somewhere here TODO
+
   Relation *RL = new Relation();
-  /* for (DomTreeNode *Child : Children){ */
   for (BasicBlock *Child : Children){
-  /* for(auto BB = CurLoop->begin(), BE = CurLoop->block_end(); BB != BE; */
-  /*     BB++){ */
-    /* BB = Child->getBlock(); */
     BB = Child;
-    DEBUG(dbgs() << "\n---- New Block ---- " << '\n');
-    BB->dump();
     DEBUG(dbgs() << "Analysis of block " << BB->getName() << " → " << BB << '\n');
     if (!CurLoop->contains(BB)){
       DEBUG(dbgs() << "---- Not In Current Loop " << '\n');
@@ -824,7 +760,6 @@ static Relation* computeRelationBodyLoop(DomTreeNode *N, Relation *RPHI, MapDeg*
           } else {
             DEBUG(dbgs() << " Relation found for Loop with Head = " << InnerHead
                   <<'\n');
-            DEBUG((*mapRel)[InnerHead]->dump(dbgs()));
           }
           (*mapDeg)[InnerHead]=0;
           OC.push_back(InnerHead);
@@ -835,26 +770,15 @@ static Relation* computeRelationBodyLoop(DomTreeNode *N, Relation *RPHI, MapDeg*
       }
     }
     else if (CurLoop->getHeader()!=BB){ //TODO Optimize
-      // TODO si c'est un then ou else ? if.cond ? la généricité ici!
+      // TODO la généricité ici!
       Relation *RB =
         computeRelation(BB,mapDeg,mapRel,AA,DT,CurLoop,CurAST,SafetyInfo,&OC);
-      DEBUG(dbgs() << " Composition du block :" << '\n');
-      DEBUG(RB->dump(dbgs()));
       if(BB->getUniqueSuccessor() == CurLoop->getHeader()){
-        DEBUG(dbgs() << " Unique successor is the header :" <<
-              CurLoop->getHeader()->getName() << '\n');
         RB = RB->composition(RPHI);
-        DEBUG(dbgs() << " Composition du block :" << '\n');
-        DEBUG(RB->dump(dbgs()));
       }
-      DEBUG(dbgs() << "\n Degrees of invariance for this block :" << '\n');
       // Deprecated… need something more polymorph
-      // FIXME
-      /* computeDeg(mapDeg, BB, mapRel, DT); */
-      /* DEBUG(dumpMapDegOfBB(mapDeg,BB,dbgs())); */
       computeDeg(mapDeg, OC, mapRel, DT);
       DEBUG(dumpMapDegOfOC(mapDeg,OC,dbgs()));
-      DEBUG(dbgs() << "\n Composition pour la boucle …" << '\n');
       RL = RL->composition(RB);
     }//End if subLoop
   }
@@ -877,19 +801,10 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapDeg*
                                            TLI, CurLoop, CurAST, SafetyInfo,
                                            DI);
     // Take the while.end into account
-    DEBUG(dbgs() << " Fixpoint…" << '\n');
     RL = fixPoint(RL);
-    DEBUG(RL->dump(dbgs()));
 
     Relation *RCMP = getWhileCondRelations(CurLoop,mapRel);
-    /* DEBUG(dbgs() << " Conditions… " << '\n'); */
-    /* DEBUG(RCMP->dump(dbgs())); */
-    /* DEBUG(dbgs() << " Who is IN? " << '\n'); */
-    /* DEBUG(printValues(RCMP->getIn(),dbgs())); */
-    /* DEBUG(dbgs() << " Who is OUT in RelationLoop? " << '\n'); */
-    /* DEBUG(printValues(RL->getOut(),dbgs())); */
     RL->addDependencies(RCMP->getIn(),RL->getOut());
-    DEBUG(dbgs() << " Condition correction… " << '\n');
     DEBUG(dbgs() << " FINAL LOOP OF DEPTH " << CurLoop->getLoopDepth() <<'\n');
     DEBUG(RL->dump(dbgs()));
     if(Value* Head = dyn_cast<Value>(CurLoop->getHeader()))
@@ -913,13 +828,9 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,
   assert(L->isLCSSAForm(*DT) && "Loop is not in LCSSA form.");
 
   AliasSetTracker *CurAST = collectAliasInfoForLoop(L, LI, AA);
-  DEBUG(dbgs() <<"*********************AliasSetTracker*****************\n");
-  CurAST->dump();
 
   // Get the preheader block to move instructions into...
   BasicBlock *Preheader = L->getLoopPreheader();
-  DEBUG(dbgs() <<"*********************PreheaderBlock******************\n");
-  Preheader->dump();
 
   // Compute loop safety information.
   LoopSafetyInfo SafetyInfo;

@@ -2,8 +2,9 @@
 
 This pass is a prototype! 
 
-It provides an invariance degree for instructions and inner loops.
-It *will* peel the loop regarding to the degrees computed previously.
+For the moment, it provides an invariance degree for instructions and
+inner loops. In the near future it *will* peel the loop regarding to
+the degrees computed previously.
 
 Build:
 

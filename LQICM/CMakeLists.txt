@@ -1,7 +1,6 @@
 add_library(LQICMPass MODULE
     # List your source files here.
     LQICM.cpp
-    #LICM.cpp
 )
 
 # Use C++11 to compile our pass (i.e., supply -std=c++11).
