@@ -59,6 +59,7 @@ namespace {
 
   public:
     Relation(){}
+    ~Relation(){}
 
     Relation(PHINode *PHI, Loop *L, bool WantIn){ 
       instructions.insert(PHI);
@@ -139,7 +140,6 @@ namespace {
         addPropag(V);
       }
     }
-    virtual ~Relation() {}
 
     /// Propagation of a value 
     ///
@@ -620,11 +620,6 @@ static Relation* computeRelation(BasicBlock* BB, MapDeg* mapDeg , MapRel*
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E;) {
       Instruction &I = *II++;
 
-      if (!canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo))
-      if (!isSafeToExecuteUnconditionally( 
-          I, DT, CurLoop, SafetyInfo,
-          CurLoop->getLoopPreheader()->getTerminator()))
-
       if (canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
           isSafeToExecuteUnconditionally( 
             I, DT, CurLoop, SafetyInfo,
@@ -841,6 +836,11 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,
                                            &mapRel, AA, LI, DT, TLI, L, CurAST,
                                            &SafetyInfo, DI);
   }
+
+  if (L->getParentLoop() && !DeleteAST)
+    LoopToAliasSetMap[L] = CurAST;
+  else
+    delete CurAST;
 
   return Changed;
 }
