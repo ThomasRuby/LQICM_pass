@@ -2,6 +2,9 @@
 //
 //                     The LLVM Compiler Infrastructure
 //
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
 //===----------------------------------------------------------------------===//
 //
 //
@@ -288,7 +291,6 @@ namespace {/*{-{*/
     ///
     void dump(raw_ostream &OS){
       DEBUG(dbgs() << "\n---- dumpRelation ----\n ");
-      OS << "Debug Relation" << '\n'<< '\t';
       OS << "Variables:" << '\n'<< '\t';
       printValues(variables,OS);
       OS << "Dependencies:" << '\n';
@@ -489,6 +491,7 @@ static void dumpMapDegOfBB(MapDeg* mapDeg, BasicBlock* BB, raw_ostream &OS){
 static Relation* getCondRelationsFromBB(BasicBlock* BB, MapRel* mapRel){
     DEBUG(dbgs() << "In getCondRelationsFromBB : " << '\n');
     Relation *RB = new Relation(BB);
+    Relation *RCMP;
     bool hasRCMP = false;
     for (BasicBlock::iterator II = BB->end(), E = BB->begin(); II != E;) {
       Instruction &I = *--II;
@@ -499,7 +502,7 @@ static Relation* getCondRelationsFromBB(BasicBlock* BB, MapRel* mapRel){
           DEBUG(dbgs() << "ERROR: 2 CMP in while.cond? " << '\n');
           // What do we do in this case? FIXME
         }
-        Relation *RCMP = new Relation(&I);
+        RCMP = new Relation(&I);
         // Save relation with instruction
         (*mapRel)[&I] = RCMP;
         DEBUG(RCMP->dump(dbgs()));
@@ -512,8 +515,17 @@ static Relation* getCondRelationsFromBB(BasicBlock* BB, MapRel* mapRel){
                isa<ExtractValueInst>(I) || isa<InsertValueInst>(I)){
         if(!hasRCMP){
           DEBUG(dbgs() << "ERROR: CMP not encountered yet!" << '\n');
+          continue;
           // What do we do in this case? FIXME
         }
+        bool contains_cmp_variables = false;
+        for(auto OP = I.op_begin(), E = I.op_end(); OP!=E;){
+          Value *v = OP->get();
+          if(RCMP->getIn().count(v))
+            contains_cmp_variables = true;
+          OP++;
+        }
+        if(contains_cmp_variables){
           Relation *RI = new Relation(&I);
           // Save relation with instruction
           (*mapRel)[&I] = RI;
@@ -521,6 +533,9 @@ static Relation* getCondRelationsFromBB(BasicBlock* BB, MapRel* mapRel){
           DEBUG(dbgs() << " Composition…" << '\n');
           RB = RI->composition(RB);
           DEBUG(RB->dump(dbgs()));
+        } else {
+          DEBUG(dbgs() << " ↑ does not contain variables in CMP" << '\n');
+        }
       }
 
       // We've reached all the conditions computations
@@ -555,6 +570,8 @@ static Relation* getPHIRelations(Loop* L, MapDeg* mapDeg, MapRel* mapRel,
         OC->push_back(&I);
         RB = RB->composition(RI);
         DEBUG(RB->dump(dbgs()));
+      } else {
+        DEBUG(dbgs() << " ↑ not a PHI inst" << '\n');
       }
     }//End of For II in BB
     if(RB->getInstructions().empty())
@@ -1033,30 +1050,36 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         RElse = RElsePHI->composition(RElse);
 
         // Compute Phi outputs
+        DEBUG(dbgs() << " Phi of Then in End : " << Then << '\n');
         Relation *RThenToEndPHI = getPHIRelations(Then,IfEnd,mapRel);
+        DEBUG(dbgs() << " Phi of Else in End : " << Then << '\n');
         Relation *RElseToEndPHI = getPHIRelations(Else,IfEnd,mapRel);
 
         // Add Phi outputs
         RThen = RThen->composition(RThenToEndPHI);
         RElse = RElse->composition(RElseToEndPHI);
 
+        Relation *RBranch = new Relation();
+        
         // Sum branchs
-        RB = RB->composition(RThen->sumRelation(RElse));
+        RBranch = RBranch->composition(RThen->sumRelation(RElse));
 
         // Here RB is the relation of the If but we need to add conditions dep
         Relation *RCMP = getCondRelationsFromBB(BB,mapRel);
-        RB->addDependencies(RCMP->getIn(),RB->getOut());
+        RBranch->addDependencies(RCMP->getIn(),RBranch->getOut());
 
         /* (*mapRel)[VThen] = RB; */
         /* (*mapRel)[VElse] = RB; */
 
         DEBUG(dbgs() << " FINAL Branch from " << TInst << '\n');
-        DEBUG(RB->dump(dbgs()));
+        DEBUG(RBranch->dump(dbgs()));
 
         (*mapDeg)[TInst] = 0;
-        (*mapRel)[TInst] = RB; // Useless FIXME
+        (*mapRel)[TInst] = RBranch; // Useless FIXME
         (*mapLoopRel)[TInst] = new MapRel();
-        (*(*mapLoopRel)[TInst])[TInst] = RB;
+        (*(*mapLoopRel)[TInst])[TInst] = RBranch;
+
+        RB = RB->composition(RBranch);
 
         // Continue with the if.end block
         RB = RB->composition(computeRelationBBInLoop(IfEnd, End, RPHI,
