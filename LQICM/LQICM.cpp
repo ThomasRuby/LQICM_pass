@@ -206,7 +206,9 @@ namespace {/*{-{*/
       dep[v1].insert(v2);
       // Add new potentially variables
       addVariable(v1);
+      in.insert(v1);
       addVariable(v2);
+      out.insert(v2);
       // No propagation anymore…
       propag.erase(v2);
     }
@@ -232,6 +234,20 @@ namespace {/*{-{*/
       return d;
     }
 
+    void addOut(VSet s){
+          for (auto VV = s.begin(), E = s.end(); VV != E; ++VV) {
+            Value* V = *VV;
+            out.insert(V);
+          }
+    }
+
+    void addIn(VSet s){
+          for (auto VV = s.begin(), E = s.end(); VV != E; ++VV) {
+            Value* V = *VV;
+            in.insert(V);
+          }
+    }
+
     void addVariables(VSet s){
           for (auto VV = s.begin(), E = s.end(); VV != E; ++VV) {
             Value* V = *VV;
@@ -253,6 +269,10 @@ namespace {/*{-{*/
       for (auto VV = sIn.begin(), E = sIn.end(); VV != E; ++VV) {
         Value* V = *VV;
         addDependencies(V,sOut);
+        // Keep a trace of in and out variables would save some computation time
+        // but use more space…
+        addOut(sOut);
+        in.insert(V);
       }
     }
 
@@ -266,6 +286,8 @@ namespace {/*{-{*/
       else 
         dep[v1] = mergeVSet(dep[v1],s);
       addVariables(s);
+      addOut(s);
+      in.insert(v1);
 
       // No propagation anymore…
       removePropag(dep[v1]);
@@ -281,6 +303,7 @@ namespace {/*{-{*/
       // Add in init
       init.insert(v);
       addVariable(v);
+      out.insert(v);
     }
 
 
@@ -387,29 +410,33 @@ namespace {/*{-{*/
       return true;
     }
 
-    VSet getOut(){
-      VSet out(init); // All initializations are out variables
-      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
-        out = mergeVSet(out,D->second);
-      }
-      return out;
-    }
+    /* VSet getOut(){ */
+    /*   VSet out(init); // All initializations are out variables */
+    /*   for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){ */
+    /*     out = mergeVSet(out,D->second); */
+    /*   } */
+    /*   return out; */
+    /* } */
 
-    VSet getIn(){
-      VSet in;
-      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
-        in.insert(D->first);
-      }
-      return in;
-    }
+    /* VSet getIn(){ */
+    /*   VSet in; */
+    /*   for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){ */
+    /*     in.insert(D->first); */
+    /*   } */
+    /*   return in; */
+    /* } */
+
+    /* std::pair<VSet,VSet> getInOut(){ */
+    /*   VSet out(init); // All initializations are out variables */
+    /*   VSet in; */
+    /*   for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){ */
+    /*     in.insert(D->first); */
+    /*     out = mergeVSet(out,D->second); */
+    /*   } */
+    /*   return std::make_pair(in, out); */
+    /* } */
 
     std::pair<VSet,VSet> getInOut(){
-      VSet out(init); // All initializations are out variables
-      VSet in;
-      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
-        in.insert(D->first);
-        out = mergeVSet(out,D->second);
-      }
       return std::make_pair(in, out);
     }
 
@@ -421,9 +448,19 @@ namespace {/*{-{*/
       return dep;
     }
 
+    VSet getOut(){
+      return out;
+    }
+
+    VSet getIn(){
+      return in;
+    }
+
   private:
     VSet instructions;
     VSet variables;
+    VSet in;
+    VSet out;
     VSet propag;
     DepMap dep;
     /* DenseMap<Value*,VSet> dep; */
@@ -434,6 +471,7 @@ namespace {/*{-{*/
   typedef SmallDenseMap<Value*, Relation*> MapRel;
   typedef SmallDenseMap<Value*, MapRel*> MapLoopRel;
   typedef SmallDenseMap<Value*, MapDeg*> MapLoopDeg;
+  typedef SmallPtrSet<Relation*,8> RSet;
 
 struct LoopInvariantCodeMotion {
   bool runOnLoop(Loop *L, AliasAnalysis *AA, LoopInfo *LI, DominatorTree *DT,
@@ -459,6 +497,18 @@ private:
   AliasSetTracker *collectAliasInfoForLoop(Loop *L, LoopInfo *LI,
                                            AliasAnalysis *AA);
 };
+
+VSet searchForRelationsWithVAsOutput(Value* V, MapRel* mapRel){
+  VSet relations;
+  for(auto R = mapRel->begin(), RE = mapRel->end(); R != RE; ++R){
+    if(R->first == V)
+      relations.insert(R->first);
+    else
+      if(R->second->getOut().count(V))
+        relations.insert(R->first);
+  }
+  return relations;
+}
 
 static void dumpMapDegOfOC(MapLoopRel *mapLoopRel, MapDeg* mapDeg,
                            std::vector<Value*> OC, raw_ostream &OS){
@@ -795,8 +845,10 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
   else{
     (*mapDeg)[I]=-1;
     if(!mapRel->count(I)){
+
       // FIXME should search for a relation where I is in the out VSet…
       DEBUG(dbgs() << "\nINFO… " << I << " has not been visited" << '\n');
+      // Means it was initialized outside the loop
       (*mapDeg)[I]=0;
       return 0;
     }
@@ -816,10 +868,27 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
         DEBUG(dbgs() << " Compute deg on dependencies ");
         for (auto VV = inInst.begin(), E = inInst.end(); VV != E; ++VV) {
           Value* V = *VV;
-          (*mapDeg)[I]=computeDeg(mapDeg,V,mapRel,DT);
-          if((*mapDeg)[I]>=degMax)
-            degMax=(*mapDeg)[I];
-            instMax = V;
+          VSet relations = searchForRelationsWithVAsOutput(V,mapRel);
+          if(relations.empty()){
+            DEBUG(dbgs() << " There is not relation which has " << V << 
+                  " in outputs then no dependence → deg = ");
+            (*mapDeg)[I]=1;
+            if((*mapDeg)[I]>=degMax){
+              degMax=(*mapDeg)[I];
+              instMax = V;
+            }
+            continue;
+          }
+          for(auto RR = relations.begin(), RRE = relations.end(); RR != RRE; ++RR){
+            Value* VR = *RR; 
+            DEBUG(dbgs() << " Relation which has " << V << " in outputs ");
+            DEBUG((*mapRel)[VR]->dump(dbgs()));
+            (*mapDeg)[I]=computeDeg(mapDeg,VR,mapRel,DT);
+            if((*mapDeg)[I]>=degMax){
+              degMax=(*mapDeg)[I];
+              instMax = VR;
+            }
+          }
         }
         // Bof! FIXME
         if (Instruction *II = dyn_cast<Instruction>(I)) {
