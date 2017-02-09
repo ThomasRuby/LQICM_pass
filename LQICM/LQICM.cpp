@@ -2,9 +2,6 @@
 //
 //                     The LLVM Compiler Infrastructure
 //
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
 //===----------------------------------------------------------------------===//
 //
 //
@@ -470,7 +467,7 @@ static void dumpMapDegOfOC(MapLoopRel *mapLoopRel, MapDeg* mapDeg,
       DEBUG(dbgs() << "Compute Deg for : " << *I << " = ");
       DEBUG(dbgs() << (*mapDeg)[I]);
       if((*mapLoopRel)[I])
-        DEBUG(dbgs() << "\n\tit's an innerBloc ↑ ");
+        DEBUG(dbgs() << "\n\tit's an innerBlock ↑ ");
       DEBUG(dbgs() << '\n');
     }
     DEBUG(dbgs() << "--------------------\n ");
@@ -798,6 +795,7 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
   else{
     (*mapDeg)[I]=-1;
     if(!mapRel->count(I)){
+      // FIXME should search for a relation where I is in the out VSet…
       DEBUG(dbgs() << "\nINFO… " << I << " has not been visited" << '\n');
       (*mapDeg)[I]=0;
       return 0;
@@ -807,7 +805,7 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
       DEBUG(dbgs() << " Relation found: " << '\n');
       DEBUG(RI->dump(dbgs()));
       if(RI->getDep().empty()){ // Empty dep
-        DEBUG(dbgs() << " No dependence ");
+        DEBUG(dbgs() << " No dependence →  deg = ");
         (*mapDeg)[I]=1;
         return 1;
       }
@@ -945,6 +943,7 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
     DEBUG(dbgs() << " BB " << bb << " is an innerBlock \n");
     // Then don't tuch the mapRel of the loop but of the current If
     mapRel = (*mapLoopRel)[bb];
+    mapDeg = new MapDeg();
   }
 
   // This case compute a LoopRelation if the Block encountered is an innerLoop
@@ -1012,17 +1011,16 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         DEBUG(dbgs() << " INFO: Exit Block of if is :" << IfEnd->getName() <<
               '\n');
 
-        /* MapDeg *mapThenDeg = new MapDeg(); */
-        /* MapDeg *mapElseDeg = new MapDeg(); */
+        // No deg computed inside. Only the relation of if matters
+        // One Relation for each branch
         MapRel *mapThenRel = new MapRel();
         MapRel *mapElseRel = new MapRel();
         std::vector<Value*> OCif;
 
         Value* VThen = dyn_cast<Value>(Then);
         Value* VElse = dyn_cast<Value>(Else);
-
-        /* (*mapLoopDeg)[VThen] = mapThenDeg; */
-        /* (*mapLoopDeg)[VElse] = mapElseDeg; */
+        
+        // Every relations of the branches will be in the corresponding map
         (*mapLoopRel)[VThen] = mapThenRel;
         (*mapLoopRel)[VElse] = mapElseRel;
 
@@ -1050,14 +1048,17 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         RElse = RElsePHI->composition(RElse);
 
         // Compute Phi outputs
-        DEBUG(dbgs() << " Phi of Then in End : " << Then << '\n');
-        Relation *RThenToEndPHI = getPHIRelations(Then,IfEnd,mapRel);
-        DEBUG(dbgs() << " Phi of Else in End : " << Then << '\n');
-        Relation *RElseToEndPHI = getPHIRelations(Else,IfEnd,mapRel);
+        // Already computed in computeRelationBBInLoop…
+        /* DEBUG(dbgs() << " Phi of Then in End : " << Then << '\n'); */
+        /* Relation *RThenToEndPHI = getPHIRelations(Then,IfEnd,mapRel); */
+
+        /* DEBUG(dbgs() << " Phi of Else in End : " << Then << '\n'); */
+        /* Relation *RElseToEndPHI = getPHIRelations(Else,IfEnd,mapRel); */
 
         // Add Phi outputs
-        RThen = RThen->composition(RThenToEndPHI);
-        RElse = RElse->composition(RElseToEndPHI);
+        /* RThen = RThen->composition(RThenToEndPHI); */
+        /* RElse = RElse->composition(RElseToEndPHI); */
+
 
         Relation *RBranch = new Relation();
         
@@ -1074,8 +1075,11 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         DEBUG(dbgs() << " FINAL Branch from " << TInst << '\n');
         DEBUG(RBranch->dump(dbgs()));
 
+
         (*mapDeg)[TInst] = 0;
-        (*mapRel)[TInst] = RBranch; // Useless FIXME
+        (*mapRel)[TInst] = RBranch;
+        // Is this useless?
+        // The sum will be added here, key = to TInst
         (*mapLoopRel)[TInst] = new MapRel();
         (*(*mapLoopRel)[TInst])[TInst] = RBranch;
 
@@ -1106,6 +1110,9 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         RB = RB->composition(RPHI);
       else{
         // TODO to check
+        if((*mapLoopRel)[bb]){
+          DEBUG(dbgs() << " getPHIRelations on inner mapRel :" << '\n');
+        }
         RB = RB->composition(getPHIRelations(BB,Succ,mapRel));
       }
     }else{
