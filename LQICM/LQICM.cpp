@@ -627,7 +627,7 @@ static Relation* getPHIRelations(Loop* L, MapDeg* mapDeg, MapRel* mapRel,
       return RB;
 }
 
-// Return Relation composed for the given BasicBlock FIXME Polymorphism!
+// Return the good relation from phi regarding to the BasicBlocks From and To
 static Relation* getPHIRelations(BasicBlock* From, BasicBlock* To, MapRel*
                                  mapRel){
     DEBUG(dbgs() << "In getPHIRelations : " << '\n');
@@ -653,7 +653,7 @@ static Relation* getPHIRelations(BasicBlock* From, BasicBlock* To, MapRel*
 }
 
 
-// Return Relation composed for the given BasicBlock FIXME Polymorphism!
+// Return the good relation from phi going from the body to the header
 static Relation* getPHIRelations(Loop* L, MapRel* mapRel, bool WantIn){
     BasicBlock* BB = L->getHeader();
     DEBUG(dbgs() << "In getPHIRelations : " << '\n');
@@ -835,11 +835,11 @@ static Relation* computeRelation(BasicBlock* BB, MapDeg* mapDeg , MapRel*
     return RB;
 }/*}-}*/
 
-// Dinamically computes the invariance degrees
-static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *DT){/*{-{*/
+// Dinamically computes the invariance degrees/*{-{*/
+static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *DT, Value *head){
   DEBUG(dbgs() << "\nINFO… " << I << " Computation degree…" << '\n');
   if((*mapDeg)[I]){
-    DEBUG(dbgs() << " Already in mapDeg " << '\n');
+    DEBUG(dbgs() << " Already in mapDeg with deg = " << (*mapDeg)[I] << '\n');
     return (*mapDeg)[I];
   }
   else{
@@ -870,7 +870,7 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
           Value* V = *VV;
           VSet relations = searchForRelationsWithVAsOutput(V,mapRel);
           if(relations.empty()){
-            DEBUG(dbgs() << " There is not relation which has " << V << 
+            DEBUG(dbgs() << " There is no relation which has " << V << 
                   " in outputs then no dependence → deg = ");
             (*mapDeg)[I]=1;
             if((*mapDeg)[I]>=degMax){
@@ -879,48 +879,71 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
             }
             continue;
           }
+          // TODO Optimize me!
           for(auto RR = relations.begin(), RRE = relations.end(); RR != RRE; ++RR){
             Value* VR = *RR; 
             DEBUG(dbgs() << " Relation which has " << V << " in outputs ");
             DEBUG((*mapRel)[VR]->dump(dbgs()));
-            (*mapDeg)[I]=computeDeg(mapDeg,VR,mapRel,DT);
+            if(VR == head){
+              DEBUG(dbgs() << " This is the Relation of the Loop! ");
+              (*mapDeg)[I]=-1;
+            } else
+              (*mapDeg)[I]=computeDeg(mapDeg,VR,mapRel,DT,head);
             if((*mapDeg)[I]>=degMax){
               degMax=(*mapDeg)[I];
               instMax = VR;
             }
           }
         }
-        // Bof! FIXME
+        bool IdominatesMax = false;
         if (Instruction *II = dyn_cast<Instruction>(I)) {
           if (Instruction *IM = dyn_cast<Instruction>(instMax)) {
-            if(degMax!=-1 && DT->dominates(II,IM)) // I avant instMax
-              (*mapDeg)[I]=degMax+1;
-            else (*mapDeg)[I]=degMax;
-            return (*mapDeg)[I];
+            IdominatesMax = DT->dominates(II,IM);
           } //End if dyn_cast<Instruction>(instMax)
+          else {
+            DEBUG(dbgs() << " INFO: Failed to cast instMax to Instruction! Is an InnerBlock?\n");
+            if (BasicBlock *BIM = dyn_cast<BasicBlock>(instMax)) {
+              DEBUG(dbgs() << " INFO: Yes it's " << BIM->getName());
+              IdominatesMax = DT->dominates(II,BIM);
+            } else 
+              DEBUG(dbgs() << " ERROR: Failed to cast I to BasicBlock!");
+          }
         } //End if dyn_cast<Instruction>(I)
+        else {
+          DEBUG(dbgs() << " INFO: Failed to cast I to Instruction! Is an InnerBlock?");
+          if(I == head)
+            DEBUG(dbgs() << " yes, it's the CurLoop then it dominates everything \n");
+          if (BasicBlock *BI = dyn_cast<BasicBlock>(I)) {
+            // TODO reverse domination here?! 
+          } else 
+            DEBUG(dbgs() << " ERROR: Failed to cast I to BasicBlock!");
+        }
+        if(degMax!=-1 && IdominatesMax) // I avant instMax
+          (*mapDeg)[I]=degMax+1;
+        else (*mapDeg)[I]=degMax;
+        return (*mapDeg)[I];
       } //End else no dependencies
     } //End else no I in mapRel
   } //End else mapDeg[I] already computed
 }/*}-}*/
 
-// Sub functions
-static MapDeg* computeDeg(MapDeg* mapDeg, std::vector<Value*> OC, MapRel*/*{-{*/
-                          mapRel, DominatorTree *DT){
+// Sub functions/*{-{*/
+static MapDeg* computeDeg(MapDeg* mapDeg, std::vector<Value*> OC, MapRel*
+                          mapRel, DominatorTree *DT, Value* head){
     for(Value* I : OC){
       DEBUG(dbgs() << "Compute Deg for : " << *I << " = ");
-      DEBUG(dbgs() << computeDeg(mapDeg,I,mapRel,DT));
+      DEBUG(dbgs() << computeDeg(mapDeg,I,mapRel,DT,head));
       DEBUG(dbgs() << '\n');
     }
 }/*}-}*/
 
 // Sub functions
 static MapDeg* computeDeg(MapDeg* mapDeg, BasicBlock* BB, MapRel* mapRel,/*{-{*/
-                          DominatorTree *DT){
+                          DominatorTree *DT, Value* head){
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E;) {
       Instruction &I = *II++;
       DEBUG(dbgs() << "Compute Deg for : " << I << " = ");
-      DEBUG(dbgs() << computeDeg(mapDeg,&I,mapRel,DT));
+      DEBUG(dbgs() << computeDeg(mapDeg,&I,mapRel,DT,head));
       DEBUG(dbgs() << '\n');
     }
 }/*}-}*/
@@ -1047,7 +1070,7 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
 
         // Continue by treating while.end
         if(BasicBlock* WhileEnd = InnerLoop->getExitBlock()){
-          DEBUG(dbgs() << " INFO: Exit Block is :" << WhileEnd->getName() << '\n');
+          DEBUG(dbgs() << " INFO: Exit Loop Block is :" << WhileEnd->getName() << '\n');
           RB = RL->composition(computeRelationBBInLoop(WhileEnd ,End ,RPHI
                                                        ,mapLoopDeg ,mapLoopRel
                                                        ,AA ,LI ,DT ,TLI ,CurLoop
@@ -1077,7 +1100,7 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
     BasicBlock *Else = TInst->getSuccessor(1);
       if(isWellFormedFork(Then,Else,CurLoop,PDT,DT)){
         BasicBlock *IfEnd = PDT->findNearestCommonDominator(Then,Else);
-        DEBUG(dbgs() << " INFO: Exit Block of if is :" << IfEnd->getName() <<
+        DEBUG(dbgs() << " INFO: Exit If Block of if is :" << IfEnd->getName() <<
               '\n');
 
         // No deg computed inside. Only the relation of if matters
@@ -1116,19 +1139,6 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         RThen = RThenPHI->composition(RThen);
         RElse = RElsePHI->composition(RElse);
 
-        // Compute Phi outputs
-        // Already computed in computeRelationBBInLoop…
-        /* DEBUG(dbgs() << " Phi of Then in End : " << Then << '\n'); */
-        /* Relation *RThenToEndPHI = getPHIRelations(Then,IfEnd,mapRel); */
-
-        /* DEBUG(dbgs() << " Phi of Else in End : " << Then << '\n'); */
-        /* Relation *RElseToEndPHI = getPHIRelations(Else,IfEnd,mapRel); */
-
-        // Add Phi outputs
-        /* RThen = RThen->composition(RThenToEndPHI); */
-        /* RElse = RElse->composition(RElseToEndPHI); */
-
-
         Relation *RBranch = new Relation();
         
         // Sum branchs
@@ -1137,9 +1147,6 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         // Here RB is the relation of the If but we need to add conditions dep
         Relation *RCMP = getCondRelationsFromBB(BB,mapRel);
         RBranch->addDependencies(RCMP->getIn(),RBranch->getOut());
-
-        /* (*mapRel)[VThen] = RB; */
-        /* (*mapRel)[VElse] = RB; */
 
         DEBUG(dbgs() << " FINAL Branch from " << TInst << '\n');
         DEBUG(RBranch->dump(dbgs()));
@@ -1248,9 +1255,7 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapLoopDeg * mapLoopDeg,
       // FIXME make it more clear↓
       (*(*mapLoopRel)[head])[head]=RL;
 
-      // Deprecated… need something more polymorph
-      // FIXME
-      computeDeg((*mapLoopDeg)[head], OC, (*mapLoopRel)[head], DT);
+      computeDeg((*mapLoopDeg)[head], OC, (*mapLoopRel)[head], DT,head);
       DEBUG(dumpMapDegOfOC(mapLoopRel,(*mapLoopDeg)[head],OC,dbgs()));
 
       return RL;
