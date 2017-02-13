@@ -845,11 +845,10 @@ static int computeDeg(MapDeg* mapDeg, Value* I, MapRel* mapRel, DominatorTree *D
   else{
     (*mapDeg)[I]=-1;
     if(!mapRel->count(I)){
-
       // FIXME should search for a relation where I is in the out VSet…
       DEBUG(dbgs() << "\nINFO… " << I << " has not been visited" << '\n');
       // Means it was initialized outside the loop
-      (*mapDeg)[I]=0;
+      (*mapDeg)[I]=1;
       return 0;
     }
     else{
@@ -1053,10 +1052,6 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         if(!(*(*mapLoopRel)[InnerHead])[InnerHead]){
           DEBUG(dbgs() << " ERROR! Relation not found for Loop with Head = " <<
                 InnerHead <<'\n');
-          /* (*(*mapLoopRel)[head])[InnerHead] = */
-          /*   computeRelationLoop(DT->getNode(InnerLoop->getHeader()), mapLoopDeg, */
-          /*                       mapLoopRel, AA, LI, DT, TLI, InnerLoop, CurAST, */
-          /*                       SafetyInfo, DI, PDT); */
         } else {
           DEBUG(dbgs() << " Relation found for Loop with Head = " << InnerHead
                 <<'\n');
@@ -1151,7 +1146,6 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         DEBUG(dbgs() << " FINAL Branch from " << TInst << '\n');
         DEBUG(RBranch->dump(dbgs()));
 
-
         (*mapDeg)[TInst] = 0;
         (*mapRel)[TInst] = RBranch;
         // Is this useless?
@@ -1234,12 +1228,6 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapLoopDeg * mapLoopDeg,
                                              mapLoopRel, AA, LI, DT, TLI,
                                              CurLoop, CurAST, SafetyInfo, DI,
                                              PDT, &OC);
-
-      // Deprecated
-      /* Relation *RL = computeRelationBodyLoop2(DT->getNode(CurLoop->getHeader()), */
-      /*                                        RPHI, mapDeg, mapRel, AA, LI, DT, */
-      /*                                        TLI, CurLoop, CurAST, SafetyInfo, */
-      /*                                        DI,&OC); */
 
       // Take the while.end into account
       DEBUG(dbgs() << " Fixpoint…" << '\n');
