@@ -7,10 +7,10 @@ int main(){
     srand(time(NULL));
     int n=rand()%100;
     int j=0; 
-    while(j<100){
+    while(j<n){
         fact=1;
         i=1;
-        while (i<n) { 
+        while (i<=n) { 
             fact=fact*i; 
             i=i+1;
         }

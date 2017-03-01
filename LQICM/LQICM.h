@@ -1,12 +1,3 @@
-//===-- LQICM.cpp - Loop Quasi-Invariant Chunk Motion Pass ------------------------===//
-//
-//                     The LLVM Compiler Infrastructure
-//
-//===----------------------------------------------------------------------===//
-//
-//
-//===----------------------------------------------------------------------===//
-
 #ifndef LLVM_TRANSFORMS_SCALAR_LQICM_H
 #define LLVM_TRANSFORMS_SCALAR_LQICM_H
 

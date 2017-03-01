@@ -1,5 +1,6 @@
 add_library(LQICMPass MODULE
     # List your source files here.
+    LQICMPeel.cpp
     LQICM.cpp
 )
 
