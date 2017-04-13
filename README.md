@@ -36,7 +36,6 @@ Registered as `EP_ModuleOptimizerEarly` it can provides statistics
 (with `-mllvm -stats` flags) on quasi-invariants detected before loop
 optimizations as here for `vim`:
 
-```
 11m16,296s | vim -O3 ModuleOptimizerEarly
 --- | ---
 3808 | number of loops
@@ -48,7 +47,6 @@ optimizations as here for `vim`:
 2480 | number of quasi-invariants detected
 333 | number of quasi-invariants Chunk detected
 24 | Number of chunks with deg >= 2
-```
 
 ## Remarks
 
