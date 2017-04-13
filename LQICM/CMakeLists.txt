@@ -1,6 +1,6 @@
 add_library(LQICMPass MODULE
     # List your source files here.
-    LQICMPeel.cpp
+    #LQICMPeel.cpp
     LQICM.cpp
 )
 
@@ -10,7 +10,7 @@ target_compile_features(LQICMPass PRIVATE cxx_range_for cxx_auto_type)
 # LLVM is (typically) built with no C++ RTTI. We need to match that;
 # otherwise, we'll get linker errors about missing RTTI data.
 set_target_properties(LQICMPass PROPERTIES
-    COMPILE_FLAGS "-fno-rtti"
+  COMPILE_FLAGS "-fno-rtti"
 )
 
 # Get proper shared-library behavior (where symbols are not necessarily
