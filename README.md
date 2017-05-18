@@ -16,7 +16,7 @@ Build:
 Run:
 
     $ edit run.sh → give the right LLVM_BUILD path
-    $ ./run.sh something.c/ll
+    $ ./run.sh something.(c|ll)
 
 Example:
 
@@ -24,8 +24,8 @@ Example:
 
 ↑ This is a basic same factorial computed *n* times. This pass detects
 the invariance of the entire loop and can peel it (see also `Fact4.c`
-which has the same factorial but of invariance degree equal to 2,
-means that the loop can be peeled twice).
+which has the same factorial but of invariance degree equal to 4,
+means that the loop can be peeled four times).
 
 ## Statistics 
 
@@ -36,7 +36,7 @@ Registered as `EP_ModuleOptimizerEarly` it can provides statistics
 (with `-mllvm -stats` flags) on quasi-invariants detected before loop
 optimizations as here for `vim`:
 
-11m16,296s | vim -O3 ModuleOptimizerEarly
+11m22,173s | vim -O3 ModuleOptimizerEarly
 --- | ---
 3808 | number of loops
 32111 | number of instructions hoisted by LICM
@@ -44,9 +44,9 @@ optimizations as here for `vim`:
 125 | number of loops not well formed
 2391 | sum of loop not analyzed
 1417 | sum of loop analyzed by LQICM
-2480 | number of quasi-invariants detected
-333 | number of quasi-invariants Chunk detected
-24 | Number of chunks with deg >= 2
+929 | number of quasi-invariants detected
+321 | number of quasi-invariants Chunk detected
+6 | Number of chunks with deg >= 2
 
 ## Remarks
 
