@@ -403,6 +403,9 @@ VSet computeDepForX(VNode* head, Value* X, MapRel* mapRel,
   if(Cj==nullptr)
     return relations;
 
+  if(!mapRel->count(Cj->getValue()))
+    return relations;
+
   Relation* Rel = (*mapRel)[Cj->getValue()];
   /* DEBUG(dbgs()<<"Found Relation with %"<< X->getName() << " as out\n"); */
 
@@ -414,7 +417,7 @@ VSet computeDepForX(VNode* head, Value* X, MapRel* mapRel,
     bool onlyPropOutside = true;
     if(!Ys.empty()){
       /* DEBUG(dbgs()<<"List of propagated variables…\n"); */
-      printValues(Ys,dbgs());
+      /* printValues(Ys,dbgs()); */
     
       for(Value* Y : Ys){
         if(mapRel->count(Y)){
@@ -447,20 +450,20 @@ VSet searchForDependedRelations(Value* I, MapRel* mapRel,
     VNode* head = returnOCinLinkedList(OR,I);
     temp = computeDepForX(head,V,mapRel,OR);
     DEBUG(dbgs()<<"New deps:\n");
-    printValues(temp,dbgs());
+    /* printValues(temp,dbgs()); */
     relations=mergeVSet(relations,temp);
   }
   return relations;
 }
 
-static int computeDepChunks(Chunk* chunk, std::vector<Value*> *OC,
+static bool computeDepChunks(Chunk* chunk, std::vector<Value*> *OC,
                              DepMapChunks* depMap){
     MapRel* mapRel = chunk->getMapRel();
     DEBUG(dbgs()<<"Compute DepChunks\n");
     for(Value* I : *OC){
-      if((*mapRel)[I]){
+      DEBUG(dbgs()<<"on " << *I << '\n');
+      if(mapRel->count(I)){
         Relation* RI = (*mapRel)[I];
-        DEBUG(dbgs()<<"on " << *I << '\n');
         VSet relations = searchForDependedRelations(I,mapRel,OC);
         std::vector<Value*> OR;
         //TODO use linked list instead!
@@ -473,10 +476,10 @@ static int computeDepChunks(Chunk* chunk, std::vector<Value*> *OC,
         dumpOC(&OR);
       } else {
         DEBUG(dbgs() << "ERROR: Relation not found in mapRel!" << '\n');
-        return 0;
+        return false;
       }
     }
-    return 1;
+    return true;
 }
 
 Value* getFirstNonPHI(std::vector<Value*> *OC){
@@ -685,7 +688,7 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
   // chunk/*{-{*/
   // of the main loop which is not an inner loop (for the moment it could only
   // be a "if-then-else" chunk…)
-  if((*mapChunk)[bb]){
+  if(mapChunk->count(bb)){
     DEBUG(dbgs() << " BB " << bb << " is the start of an inner Chunk\n");
     //TODO manage the following cases
     // 1 it's a branch -> then just use the corresponding chunk
@@ -783,13 +786,11 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         ThenChunk->setStart(Then);
         ThenChunk->setEnd(IfEnd);
         ThenChunk->setType(Chunk::BRANCH);
-        (*mapChunk)[VThen] = ThenChunk;
 
         Chunk* ElseChunk = new Chunk(Else->getName()); // Creates mapRel
         ElseChunk->setStart(Else);
         ElseChunk->setEnd(IfEnd);
         ElseChunk->setType(Chunk::BRANCH);
-        (*mapChunk)[VElse] = ElseChunk;
 
         // DEPRECATED
         /* (*mapChunkRel)[VThen] = mapThenRel; */
@@ -818,10 +819,12 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         /* RThen->setStart(Then); */
         /* RThen->setEnd(IfEnd); */
         /* RThen->setBranch(true); */
-        if(Then != IfEnd)
+        if(Then != IfEnd){
+          (*mapChunk)[VThen] = ThenChunk;
           RThen = computeRelationBBInLoop(Then, IfEnd, RPHI, mapChunk,
                                           ThenChunk, AA, LI, DT, CurLoop,
                                           CurAST, SafetyInfo, DI, PDT, &OCif);
+        }
         if(!RThen){
           DEBUG(errs() << " ERROR in RThen of: " << Then->getName() << '\n');
           ThenChunk->setType(Chunk::ERROR);
@@ -838,10 +841,12 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         /* RElse->setBranch(true); */
         DEBUG(dbgs() << " Computing RElse : " << Else->getName() << " to " <<
               IfEnd->getName() << '\n');
-        if(Else != IfEnd)
+        if(Else != IfEnd){
+          (*mapChunk)[VElse] = ElseChunk;
           RElse = computeRelationBBInLoop(Else, IfEnd, RPHI, mapChunk,
                                           ElseChunk, AA, LI, DT, CurLoop,
                                           CurAST, SafetyInfo, DI, PDT, &OCif);
+        }
 
         if(!RElse){
           DEBUG(errs() << " ERROR in RElse of: " << Else->getName() << '\n');
@@ -1028,7 +1033,8 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapChunk* mapChunk,
       /* (*(*mapChunkRel)[head])[head]=RL; */
 
       DepMapChunks depMap;
-      computeDepChunks(loopChunk,OC,&depMap);
+      if(!computeDepChunks(loopChunk,OC,&depMap))
+        return nullptr;
 
       //get first not phi value of OC 
       Value* term = getFirstNonPHI(OC);
