@@ -64,6 +64,11 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapChunk* mapChunk,
                                      PostDominatorTree *PDT, std::vector<Value*>
                                      *OC);
 
+VSet searchForDependedRelations(Relation* RI, MapRel* mapRel, Value* end);
+
+Value* searchForFirstComWithVAsOutputInOC(Value* V, MapRel* mapRel,
+                                        std::vector<Value*> *OC);
+
 bool myCanSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
                               Loop *CurLoop, AliasSetTracker *CurAST,
                               LoopSafetyInfo *SafetyInfo) {
@@ -177,45 +182,89 @@ static Relation* computeRelation(BasicBlock* BB, MapDeg* mapDeg , MapRel*
       (*mapRel)[&I] = RI;
       DEBUG(RI->dump(dbgs()));
       DEBUG(dbgs() << " Composition…" << '\n');
-      RB = RB->composition(RI);
+      if(!(*mapDeg)[&I])
+        RB = RB->composition(RI);
       DEBUG(RB->dump(dbgs()));
     }//End of For II in BB
     return RB;
 }/*}-}*/
 
-bool IDominatesJ(Value* I, Value* J, DominatorTree* DT, Value* head){
-  bool IdominatesJ = false;
-  DEBUG(dbgs() << " In IDominatesJ…\n");
-  if (Instruction *II = dyn_cast<Instruction>(I)) {
-    if (Instruction *IM = dyn_cast<Instruction>(J)) {
-      IdominatesJ = DT->dominates(II,IM);
-    } //End if dyn_cast<Instruction>(J)
-    else {
-      DEBUG(dbgs() << " INFO: Failed to cast J to Instruction!" << 
-            " Is an InnerBlock?\n");
-      if (BasicBlock *BIM = dyn_cast<BasicBlock>(J)) {
-        DEBUG(dbgs() << " INFO: Yes it's " << BIM->getName() << '\n');
-        IdominatesJ = DT->dominates(II,BIM);
-      } else 
-        DEBUG(errs() << " ERROR: Failed to cast J to BasicBlock!");
-    }
-  } //End if dyn_cast<Instruction>(I)
-  else {
-    DEBUG(dbgs() << " INFO: Failed to cast I to Instruction! Is an InnerBlock?");
-    if(I == head)
-      DEBUG(dbgs() << "it's the CurLoop then it dominates everything\n");
-    if (BasicBlock *BI = dyn_cast<BasicBlock>(I)) {
-      // TODO reverse domination here?! 
-      // FIXME What to do here IMPORTANT!
-      // IdominatesMax = DT->dominates(IM,BI); Kind…
-    } else 
-      DEBUG(errs() << " ERROR: Failed to cast I to BasicBlock!");
+//TODO optimize me!
+VNode* returnOCinLinkedList(std::vector<Value*> *OC, Value* me){
+
+  auto start = OC->rbegin();
+  VNode* Head = new VNode(OC->back());
+  VNode* last = Head;
+  start++;
+  for(auto v = start, e = OC->rend()++; v != e; v++){
+    VNode* VN = new VNode(*v);
+    last->setNext(VN);
+    last = VN;
   }
-  return IdominatesJ;
+  last->setNext(Head);
+
+  VNode* it = Head;
+  unsigned long i=0;
+  while(i <= OC->size()){
+    if(it->getValue() == me){
+      Head = it->getNext();
+      it->setNext(nullptr);
+      return Head;
+    }
+    it = it->getNext();
+    i++;
+  }
+  DEBUG(dbgs() << "ERROR: did not find " << *me << " in OC!" << '\n');
+  return nullptr;
+}
+
+//FIXME use the linked list instead
+static void dominanceOrder(VSet relations, std::vector<Value*>
+                                           *OC,std::vector<Value*> *result,
+                                           Value* me){
+  auto Ime=OC->begin();
+  for(; *Ime != me; Ime++){}
+  
+  auto start = OC->end(); 
+  if(Ime!=OC->begin())
+    start = Ime-1;
+
+  for(auto v = start; v != Ime; --v){
+    if(relations.count(*v))
+      result->push_back(*v);
+    if(v == OC->begin())
+      v = OC->end();
+  }
+  if(relations.count(*Ime)) //Add the chunk itself if it depends of itself
+    result->push_back(*Ime);
+
+  if(result->size()!=relations.size()){
+    DEBUG(errs() << " ERROR: Failed to order chunks\n");
+    result->clear(); // FIXME
+    for(auto RR = relations.begin(), RRE = relations.end(); RR != RRE; ++RR){
+      Value* VR = *RR; 
+      result->push_back(VR);
+    }
+  }
+}
+
+static bool IdominatesJ(Value* me, Value* J, VNode* head){
+  VNode* it = head;
+  if(it==nullptr){
+    DEBUG(dbgs() << "ERROR: construction of the linked list failed\n");
+    return false;
+  }
+  while(it->getValue()!=me){
+    if(it->getValue()==J)
+      return true;
+    it = it->getNext();
+  }
+  return false;
 }
 
 // Dinamically computes the invariance degrees/*{-{*/
-static int computeDeg(Chunk* chunk, Value* I, DominatorTree *DT, Value *head){
+static int computeDeg(Chunk* chunk, Value* I, DominatorTree *DT, Value *head,
+                      VNode* Nhead, DepMapChunks* depMap){
   MapDeg* mapDeg = chunk->getMapDeg();
   MapRel* mapRel = chunk->getMapRel();
   DEBUG(dbgs() << " Computation degree of " << *I << '\n');
@@ -236,76 +285,57 @@ static int computeDeg(Chunk* chunk, Value* I, DominatorTree *DT, Value *head){
       Relation* RI = (*mapRel)[I];
       DEBUG(dbgs() << "\tRelation found: " << '\n');
       DEBUG(RI->dump(dbgs()));
+      int deg = 1;
       if(RI->getDep().empty()){ // Empty dep
-        (*mapDeg)[I] = 1;
+        if(isa<PHINode>(I) && isa<BasicBlock>(head)){
+          PHINode* PHI = dyn_cast<PHINode>(I);
+          BasicBlock* Head = dyn_cast<BasicBlock>(head);
+          if(PHI->getParent()==Head)
+            deg=2;
+        }
+        (*mapDeg)[I] = deg;
         DEBUG(dbgs() << "\tNo dependence →  deg = " << (*mapDeg)[I]);
-        return 1;
+        return deg;
       }
       else{
         Value* instMax;
         int degMax=-1;
         bool isVariant = false;
         bool isOnlyOutOfLoop = true;
-        VSet inInst = RI->getIn();
-        DEBUG(dbgs() << "\tCompute deg on dependencies");
-        DEBUG(dbgs() << "\tVariables In:" << '\n'<< '\t');
-        DEBUG(printValues(inInst,dbgs()));
-        // Search for the max deg of inputs variables
-        for (auto VV = inInst.begin(), E = inInst.end(); VV != E; ++VV) {
-          Value* V = *VV;
-          DEBUG(dbgs() << "\tValue " << V << " in inputs…\n");
-          VSet relations = searchForRelationsWithVAsOutput(V,mapRel);
-          // Case 1 : there is no relations with V as output variable
-          if(relations.empty()){
-            DEBUG(dbgs() << "\tThere is no relation which has " << V << 
-                  " in outputs… \n");
-            // If it's in mapDeg, then it has been visited in the loop
-            if((*mapDeg).count(V)){
-              DEBUG(dbgs() << "\tV is in the loop…");
-              // If it's not an anchor 
-              if((*mapDeg)[V]!=-1){
-                DEBUG(dbgs() << "\tV is not an anchor and its value = " <<
-                      (*mapDeg)[V] << "…");
-                // Then init to 1 and update max infos
-                (*mapDeg)[I]=1;
-                if((*mapDeg)[I]>=degMax){
-                  degMax=(*mapDeg)[I];
-                  instMax = V;
-                }
-                continue;
-              } else {
-                DEBUG(dbgs() << "\tV is an anchor and the max… finish\n");
-                (*mapDeg)[I]=-1;
-                return -1;
-                // If it's an anchor then we already found the max, we can stop
-              }
-            } else{
-              // If it's not a value in the loop
-              DEBUG(dbgs() << "\tV is outside of the loop… ");
-              // Then init to 1 and update max infos
-              (*mapDeg)[I]=1;
-              if((*mapDeg)[I]>=degMax){
-                degMax=(*mapDeg)[I];
-                instMax = V;
-              }
-              continue;
-            }
+
+        if((*depMap)[I].empty()){
+          DEBUG(dbgs() << "\tThere is no relation which has inputs of V " <<
+                "in outputs… \n");
+          DEBUG(dbgs() << "\tV is outside of the loop… ");
+          int deg = 1;
+          if(isa<PHINode>(I) && isa<BasicBlock>(head)){
+            PHINode* PHI = dyn_cast<PHINode>(I);
+            BasicBlock* Head = dyn_cast<BasicBlock>(head);
+            if(PHI->getParent()==Head)
+              deg=2;
           }
-          DEBUG(dbgs() << "\tThere is " << relations.size() << " relations:");
-          // TODO Optimize me!
-          for(auto RR = relations.begin(), RRE = relations.end(); RR != RRE; ++RR){
-            Value* VR = *RR; 
-            DEBUG(dbgs() << " Relation which has " << V << " in outputs ");
-            DEBUG((*mapRel)[VR]->dump(dbgs()));
+          (*mapDeg)[I] = deg;
+          if((*mapDeg)[I]>=degMax){
+            degMax=(*mapDeg)[I];
+            /* instMax = V; */
+          }
+          return deg;
+        } else{
+          // Dominance order please…
+          std::vector<Value*> OR = (*depMap)[I];
+          dumpDependences(I,depMap);
+
+          for(Value* VR : OR){
+            /* DEBUG((*mapRel)[VR]->dump(dbgs())); */
             // TODO Remove this head and the value itself from here…
             if (VR == head){
               DEBUG(dbgs() << " This is the Relation of the Loop itself! ");
               continue;
             } else if (VR == I){
               DEBUG(dbgs() << " This is the Relation of the Chunk itself! ");
-              continue;
+              return -1;
             } else {
-              (*mapDeg)[I]=computeDeg(chunk,VR,DT,head);
+              (*mapDeg)[I]=computeDeg(chunk,VR,DT,head,Nhead,depMap);
               DEBUG(dbgs() << " out of rec call of computeDeg…" << '\n');
             }
             if ((*mapDeg)[I] == -1){
@@ -319,50 +349,156 @@ static int computeDeg(Chunk* chunk, Value* I, DominatorTree *DT, Value *head){
               instMax = VR;
             } 
           }
-          if(isVariant)
-            break;
-        }
 
-        //Optimize me TODO
-        if(!(*mapDeg).count(instMax)){
-          DEBUG(dbgs() << "\n The max is outside then return 1");
-          return 1;
-        }
+          //Optimize me TODO
+          if(!(*mapDeg).count(instMax)){
+            DEBUG(dbgs() << "\n The max is outside then return 1");
+            return 1;
+          }
 
-        DEBUG(dbgs() << "\n is " << I << "\ndominates " <<
-              instMax << '\n');
-        bool IdominatesMax = IDominatesJ(I,instMax,DT,head);
-        DEBUG(dbgs() << "\n" << IdominatesMax);
-        if(degMax!=-1 && IdominatesMax) // I avant instMax
-          (*mapDeg)[I]=degMax+1;
-        else (*mapDeg)[I]=degMax;
-        DEBUG(dbgs() << "\t deg = " << (*mapDeg)[I] << '\n');
-        return (*mapDeg)[I];
+          DEBUG(dbgs() << "\n is " << I << "\ndominates " <<
+                instMax << '\n');
+          /* bool IdominatesMax = IDominatesJ(I,instMax,DT,head); */
+          bool IdominatesMax = IdominatesJ(I, instMax, Nhead);
+          DEBUG(dbgs() << "\n" << IdominatesMax);
+          if(degMax!=-1 && IdominatesMax) // I avant instMax
+            (*mapDeg)[I]=degMax+1;
+          else (*mapDeg)[I]=degMax;
+          DEBUG(dbgs() << "\t deg = " << (*mapDeg)[I] << '\n');
+          return (*mapDeg)[I];
+        }
       } //End else no dependencies
     } //End else no I in mapRel
   } //End else mapDeg[I] already computed
 }/*}-}*/
 
-// Sub functions
-static MapDeg* computeDeg(Chunk* chunk, std::vector<Value*> *OC, DominatorTree
-                          *DT, Value* head){
+VNode* searchForFirstComWithVAsOutputInOC(Value* V, MapRel* mapRel,
+                                          VNode* Head){
+  VNode* res;
+  VNode* VN = Head;
+  while(VN!=nullptr){
+    Value* I = VN->getValue();
+    if(I == V)
+      return VN;
+    else{
+      if((*mapRel).count(I)){
+        Relation* Rel = (*mapRel)[I];
+        VSet out = Rel->getOut();
+        if(out.count(V))
+          return VN;
+      }
+    }
+    VN = VN->getNext();
+  }
+  DEBUG(dbgs()<<"INFO: no Relation found!\n");
+  return nullptr;
+}
+
+VSet computeDepForX(VNode* head, Value* X, MapRel* mapRel,
+                    std::vector<Value*> *OC){
+  VNode* Cj = searchForFirstComWithVAsOutputInOC(X,mapRel,head);
+  VSet relations;
+
+  //If there is no dep return empty set
+  if(Cj==nullptr)
+    return relations;
+
+  Relation* Rel = (*mapRel)[Cj->getValue()];
+  /* DEBUG(dbgs()<<"Found Relation with %"<< X->getName() << " as out\n"); */
+
+  //If it's not the last command
+  if(Cj->getNext()!=nullptr){
+    if(!Rel->isOnlyProp(X))
+      relations.insert(Cj->getValue());
+    VSet Ys = Rel->getPropFor(X);
+    bool onlyPropOutside = true;
+    if(!Ys.empty()){
+      /* DEBUG(dbgs()<<"List of propagated variables…\n"); */
+      printValues(Ys,dbgs());
+    
+      for(Value* Y : Ys){
+        if(mapRel->count(Y)){
+          /* DEBUG(dbgs()<<"\tRec call of computeDepForX… on %"
+           * << Y->getName() << '\n'); */
+          relations=mergeVSet(relations,computeDepForX(Cj->getNext(),Y,mapRel,OC));
+          onlyPropOutside = false;
+        } 
+      }
+      if(onlyPropOutside)
+        relations.insert(X);
+    }
+  }
+  else {
+    //FIXME not sure ↓
+    if(Rel->isStrong(X) && (!isa<SelectInst>(Cj->getValue())))
+      relations.insert(Cj->getValue());
+  }
+  return relations;
+}
+
+VSet searchForDependedRelations(Value* I, MapRel* mapRel,
+                                std::vector<Value*> *OR){
+  Relation* RI = (*mapRel)[I];
+  VSet inInst = RI->getIn();
+  VSet relations;
+  VSet temp;
+  for (auto V : inInst) {
+    DEBUG(dbgs()<<"for " << *V << ":\n");
+    VNode* head = returnOCinLinkedList(OR,I);
+    temp = computeDepForX(head,V,mapRel,OR);
+    DEBUG(dbgs()<<"New deps:\n");
+    printValues(temp,dbgs());
+    relations=mergeVSet(relations,temp);
+  }
+  return relations;
+}
+
+static int computeDepChunks(Chunk* chunk, std::vector<Value*> *OC,
+                             DepMapChunks* depMap){
+    MapRel* mapRel = chunk->getMapRel();
+    DEBUG(dbgs()<<"Compute DepChunks\n");
     for(Value* I : *OC){
-      int deg = computeDeg(chunk,I,DT,head);
+      if((*mapRel)[I]){
+        Relation* RI = (*mapRel)[I];
+        DEBUG(dbgs()<<"on " << *I << '\n');
+        VSet relations = searchForDependedRelations(I,mapRel,OC);
+        std::vector<Value*> OR;
+        //TODO use linked list instead!
+        if(relations.size()!=1)
+          dominanceOrder(relations,OC,&OR,I);
+        else 
+          OR.push_back(*(relations.begin()));
+        (*depMap)[I]=OR;
+        DEBUG(dbgs()<<"list of deps for " << *I << ":\n");
+        dumpOC(&OR);
+      } else {
+        DEBUG(dbgs() << "ERROR: Relation not found in mapRel!" << '\n');
+        return 0;
+      }
+    }
+    return 1;
+}
+
+Value* getFirstNonPHI(std::vector<Value*> *OC){
+    for(Value* I : *OC){
+      if(isa<PHINode>(I))
+        continue;
+      else 
+        return I;
+    }
+    return OC->back();
+} 
+
+// Sub functions
+static MapDeg* computeDegOC(Chunk* chunk, VNode* Nhead ,std::vector<Value*> *OC,
+                            DominatorTree *DT, Value* head, DepMapChunks*
+                            depMap){
+    for(Value* I : *OC){
+      int deg = computeDeg(chunk,I,DT,head,Nhead,depMap);
       DEBUG(dbgs() << "\nfinal result for "<< I << " = " << deg);
       DEBUG(dbgs() << '\n');
     }
 } 
-
-// Sub function
-static MapDeg* computeDeg(Chunk* chunk, BasicBlock* BB, DominatorTree *DT,
-                          Value* head){
-    for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E;) {
-      Instruction &I = *II++;
-      int deg = computeDeg(chunk,&I,DT,head);
-      DEBUG(dbgs() << "\nfinal result for "<< I.getName() << " = " << deg);
-      DEBUG(dbgs() << '\n');
-    }
-}
 
 static bool isGuaranteedToExecute(BasicBlock* BB, Loop* CurLoop,/*{-{*/
                                         DominatorTree* DT){
@@ -466,7 +602,6 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
     return RB;
   }
 
-
   // This case find the LoopRelation if the Block encountered is an inner Loop/*{-{*/
   // header
   if(inSubLoop(BB, CurLoop, LI)){
@@ -484,8 +619,6 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
                 InnerHead->getName() <<'\n');
 
           return nullptr;
-          /* OC->push_back(InnerHead); // FIXME redo OC regarding to chunks */
-          /* (*currentChunk->getMapDeg())[InnerHead] = -1; */
         } else {
 
           Chunk* innerLoopChunk = (*mapChunk)[InnerHead];
@@ -499,11 +632,9 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
                 InnerHead->getName() <<'\n');
           DEBUG(innerLoopChunk->getRel()->dump(dbgs()));
           (*currentChunk->getMapRel())[InnerHead] = innerLoopChunk->getRel();
-          /* (*(*mapChunkRel)[head])[InnerHead] = innerLoopChunk->getRel(); */
 
           // Initialization: we suppose the loop is hoistable
           (*currentChunk->getMapDeg())[InnerHead] = 0;
-          /* (*(*mapChunkDeg)[head])[InnerHead] = 0; */ 
 
           OC->push_back(InnerHead); // FIXME redo OC regarding to chunks
           RL = RL->composition(innerLoopChunk->getRel());
@@ -514,7 +645,7 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
           DEBUG(dbgs() << " INFO: Exit Loop Block is :" << WhileEnd->getName()
                 << '\n');
           Relation* RNextPHI =
-            getPHIRelations(InnerLoop->getHeader(),WhileEnd,mapRel);
+            getPHIRelations(InnerLoop->getHeader(),WhileEnd,mapRel,OC);
           DEBUG(dbgs() << " Composition with out phi LCSSA…" << '\n');
           RL = RL->composition(RNextPHI);
           DEBUG(RB->dump(dbgs()));
@@ -669,13 +800,13 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
               IfEnd->getName() << '\n');
         Relation *RThenPHI = new Relation();
         if(Then != IfEnd)
-          RThenPHI = getPHIRelations(BB,Then,mapRel);
+          RThenPHI = getPHIRelations(BB,Then,mapRel,OC);
 
         DEBUG(dbgs() << " Computing RElsePHI : " << Then->getName() << " to " <<
               IfEnd->getName() << '\n');
         Relation *RElsePHI = new Relation();
         if(Else != IfEnd)
-          RElsePHI = getPHIRelations(BB,Else,mapRel);
+          RElsePHI = getPHIRelations(BB,Else,mapRel,OC);
 
 
         // Recursive call on each branch
@@ -805,10 +936,13 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
             End->getName() << '\n');
       // If there is some phi in End take into account here the assignements
       // If it's the header of the current loop, they are already computed
-      if(End == CurLoop->getHeader())
+      if(End == CurLoop->getHeader()){
+        DEBUG(dbgs() << " Found the end, now compose with phi relation…" << '\n');
+        DEBUG(RPHI->dump(dbgs()));
         RB = RB->composition(RPHI);
+      }
       else{
-        Relation* RNextPHI = getPHIRelations(BB,Succ,mapRel);
+        Relation* RNextPHI = getPHIRelations(BB,Succ,mapRel,OC);
         DEBUG(dbgs() << " Composition with main relation…" << '\n');
         RB = RB->composition(RNextPHI);
         DEBUG(RB->dump(dbgs()));
@@ -866,7 +1000,7 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapChunk* mapChunk,
 
       Chunk* loopChunk = (*mapChunk)[head];
 
-      Relation *RPHI = getPHIRelations(CurLoop,loopChunk->getMapRel(),false);
+      Relation *RPHI = getPHIRelations(CurLoop,loopChunk->getMapRel(),false,OC);
       BasicBlock *FirstBody = getFirstBodyOfLoop(CurLoop);
       Relation *RL = computeRelationBBInLoop(FirstBody, Head, RPHI, mapChunk,
                                              loopChunk, AA, LI, DT, CurLoop,
@@ -888,15 +1022,23 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapChunk* mapChunk,
       DEBUG(dbgs() << " FINAL LOOP OF DEPTH " << CurLoop->getLoopDepth() << 
             " and header = " << head->getName() <<'\n');
       DEBUG(RL->dump(dbgs()));
-      // FIXME make it more clear↓
-      /* (*loopChunk->getMapRel())[head] = RL; */
-      // Should be only ↓
       loopChunk->setRel(RL);
       loopChunk->setAnchor(RL->isAnchor());
       // DEPRECATED
       /* (*(*mapChunkRel)[head])[head]=RL; */
 
-      computeDeg(loopChunk, OC, DT,head);
+      DepMapChunks depMap;
+      computeDepChunks(loopChunk,OC,&depMap);
+
+      //get first not phi value of OC 
+      Value* term = getFirstNonPHI(OC);
+      //get a reversed linked list of commands starting with term↑
+      VNode* Nhead = returnOCinLinkedList(OC,term);
+      dumpOC(OC);
+      DEBUG(dbgs() << " ----- Reversed Linked List ----- \n");
+      Nhead->dump();
+
+      computeDegOC(loopChunk, Nhead, OC, DT, head, &depMap);
       DEBUG(dbgs() << " MapDeg in chunk " << loopChunk->getName() << '\n');
       dumpMapDegOfOC(mapChunk,loopChunk->getMapDeg(),OC,dbgs());
 
@@ -962,6 +1104,7 @@ static void registerLQICMPass(const PassManagerBuilder &,
   PM.add(new LegacyLQICMPass());
 }
 static RegisterStandardPasses
+//FIXME Where should we put this pass?
 RegisterClangPass(PassManagerBuilder::EP_ModuleOptimizerEarly, registerLQICMPass);
 
 int getDegMax(MapDeg *MD){/*{-{*/
@@ -990,7 +1133,6 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,/*{-{*/
         dbgs() << "  Not unrolling loop which is not in loop-simplify form.\n");
     return false;
   }
-
 
   DEBUG(dbgs() <<"********************* DUMP LOOP BEFORE ******************\n");
 
@@ -1118,7 +1260,8 @@ static bool isTriviallyReplacablePHI(const PHINode &PN, const Instruction &I) {/
   return true;
 }/*}-}*/
 
-static Instruction */*{-{*/
+/*{-{*/
+static Instruction *
 CloneInstructionInExitBlock(Instruction &I, BasicBlock &ExitBlock, PHINode &PN,
                             const LoopInfo *LI,
                             const LoopSafetyInfo *SafetyInfo) {
@@ -1135,7 +1278,6 @@ CloneInstructionInExitBlock(Instruction &I, BasicBlock &ExitBlock, PHINode &PN,
       OperandBundleUse Bundle = CI->getOperandBundleAt(BundleIdx);
       if (Bundle.getTagID() == LLVMContext::OB_funclet)
         continue;
-
       OpBundles.emplace_back(Bundle);
     }
 

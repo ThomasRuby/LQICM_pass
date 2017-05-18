@@ -46,6 +46,7 @@
 /* #include <utility> */
 
 using namespace llvm;
+using namespace std;
 
 #define DEBUG_TYPE "lqicm"
 
@@ -61,8 +62,29 @@ STATISTIC(NumError, "Number of loops not analyzed…");
 // Relation object TODO should be somewhere else…
 namespace llvm {/*{-{*/
 
-  typedef DenseMap<Value*,SmallPtrSet<Value*,8>> DepMap;
+  enum DepType { 
+    EMPT, // (0,0)
+    PROP, // (1,0)
+    STRO, // (0,1)
+    TOTA, // (1,1)
+  };
+
+  DepType Plus[4][4] = { {EMPT,PROP,STRO,TOTA},
+                      {PROP,PROP,TOTA,TOTA},
+                      {STRO,TOTA,STRO,TOTA},
+                      {TOTA,TOTA,TOTA,TOTA}
+                    };
+  DepType Time[4][4] = { {EMPT,EMPT,EMPT,EMPT},
+                      {EMPT,PROP,STRO,TOTA},
+                      {EMPT,STRO,STRO,TOTA},
+                      {EMPT,TOTA,TOTA,TOTA}
+                    };
+
+  typedef std::pair<Value*,Value*> Arrow;
+  typedef DenseMap<Arrow,DepType> DepMap;
+  typedef DenseMap<Value*,std::vector<Value*>> DepMapChunks;
   typedef SmallPtrSet<Value*,8> VSet;
+  typedef DenseMap<Value*,VSet> DepMapVars;
   typedef SmallPtrSet<Instruction*,8> ISet;
   typedef SmallPtrSet<BasicBlock*,8> BSet;
   typedef DenseMap<Value*, int> MapDeg;
@@ -76,17 +98,19 @@ namespace llvm {/*{-{*/
     return s;
   }
 
-  DepMap mergeDep(DepMap d1, DepMap d2){
+  DepMap plusDep(DepMap d1, DepMap d2){
     DepMap d(d2);
     for(auto D1 = d1.begin(), D1E = d1.end(); D1 != D1E; ++D1){
-      Value* X1 = D1->first;
-      VSet spt1 = D1->second;
-      if(d2.count(X1))
-        d[X1] = mergeVSet(d1[X1],d2[X1]);
-      else d[X1] = d1[X1];
+      Arrow X1 = D1->first;
+      DepType dType = D1->second;
+      // The pair exists in d2
+      if(d2.count(X1)) // Take the sum
+          d[X1] = Plus[d1[X1]][d2[X1]];
+      else d[X1] = dType;
     }
     return d;
-  }
+  } 
+
 
   ISet mergeISet(const ISet s1, const ISet s2){
     ISet s(s1);
@@ -95,6 +119,27 @@ namespace llvm {/*{-{*/
       s.insert(V);
     }
     return s;
+  }
+
+  static void printDepTypes(DepMap d1, raw_ostream &OS){
+    OS << "[\n";
+    for(auto D1 = d1.begin(), D1E = d1.end(); D1 != D1E; ++D1){
+      Arrow X1 = D1->first;
+      DepType dType = D1->second;
+      Value* v1 = X1.first;
+      Value* v2 = X1.second;
+      OS << '(' << v1->getName() << ':' << v2->getName() << "):";
+      if(dType == EMPT)
+        OS << "EMPT";
+      if(dType == PROP)
+        OS << "PROP";
+      if(dType == STRO)
+        OS << "STRO";
+      if(dType == TOTA)
+        OS << "TOTA";
+      OS << ";\n";
+    }
+    OS << "]\n";
   }
 
   static void printValues(VSet spt, raw_ostream &OS){
@@ -107,13 +152,42 @@ namespace llvm {/*{-{*/
     OS << "]\n";
   }
 
+  class VNode {
+  public: 
+    VNode(Value* v){
+      value=v;
+    }
+    ~VNode(){
+      next=nullptr;
+      value=nullptr;
+    }
+    void setNext(VNode* n){
+     next=n; 
+    }
+    VNode* getNext(){
+     return next; 
+    }
+    Value* getValue(){
+     return value; 
+    }
+    void dump(){
+      VNode* VN = this;
+      while(VN!=nullptr){
+        DEBUG(dbgs() << VN->getValue() << '\n');
+        VN = VN->getNext();
+      }
+    }
+
+  private:
+    Value* value;
+    VNode* next;
+  };
+
   class Relation {
   protected:
     Relation(Relation &&) = default;
     Relation &operator=(Relation &&) = default;
     void setVariables(VSet v) { variables = v; }
-    void setPropag(VSet v) { propag = v; }
-    void setInit(VSet v) { init = v; }
     void setDep(DepMap d) { dep = d; }
 
   public:
@@ -122,6 +196,7 @@ namespace llvm {/*{-{*/
       branch = false;
       anchor = false;
     }
+
     ~Relation(){
       instructions.clear();
       assert(instructions.empty() &&
@@ -135,15 +210,15 @@ namespace llvm {/*{-{*/
       out.clear();
       assert(out.empty() &&
              "Didn't free instructions in relation");
-      propag.clear();
-      assert(propag.empty() &&
-             "Didn't free instructions in relation");
+      /* propag.clear(); */
+      /* assert(propag.empty() && */
+      /*        "Didn't free instructions in relation"); */
       dep.shrink_and_clear();
       assert(dep.empty() &&
              "Didn't free instructions in relation");
-      init.clear();
-      assert(init.empty() &&
-             "Didn't free instructions in relation");
+      /* init.clear(); */
+      /* assert(init.empty() && */
+      /*        "Didn't free instructions in relation"); */
       Start = nullptr;
       End = nullptr;
     }
@@ -164,10 +239,10 @@ namespace llvm {/*{-{*/
         if(isIn){
           DEBUG(dbgs() << "\tInstruction is from: \n" << *From << '\n');
           instructions.insert(PHI);
-          addPropag(PHI);
           if(!isa<Constant>(v)){
             addPropag(v);
-            addDependence(v,PHI);
+            addDependence(make_pair(v,PHI),PROP);
+            /* addDependence(v,PHI); */
           } else{
             addInit(PHI);
           }
@@ -185,7 +260,7 @@ namespace llvm {/*{-{*/
     Relation(PHINode *PHI, Loop *L, bool WantIn){ 
       // In which case we consider I ?
       instructions.insert(PHI);
-      addPropag(PHI);
+      /* addPropag(PHI); */
       DEBUG(dbgs() << "\tNew Instruction\t" << " = \t" << PHI << '\n');
       unsigned i=0;
       bool onlyConst = true;
@@ -201,17 +276,17 @@ namespace llvm {/*{-{*/
           if(isIn){
             if(!isa<Constant>(v)){
               addPropag(v);
-              addDependence(v,PHI);
+              addDependence(make_pair(v,PHI),PROP);
+              /* addDependence(v,PHI); */
               onlyConst = false;
-            } else{
-              addInit(PHI);
             }
           }
         } else{
           // Do not take initialisation into account
           if(!isa<Constant>(v) && !isIn){
             addPropag(v);
-            addDependence(v,PHI);
+            addDependence(make_pair(v,PHI),PROP);
+            /* addDependence(v,PHI); */
             onlyConst = false;
           }
         }
@@ -232,9 +307,40 @@ namespace llvm {/*{-{*/
         if(isa<Constant>(v))
           addInit(I);
         else
-          addDependence(v,I);
+          addDependence(make_pair(v,I),PROP);
+          /* addDependence(v,I); */
       }
-      else if (isa<BinaryOperator>(I) || isa<CastInst>(I) || isa<SelectInst>(I) ||
+      else if (isa<SelectInst>(I)){
+        instructions.insert(I);
+        addPropag(I);
+        DEBUG(dbgs() << "\tNew Select Instruction\t" << " = \t" << *I
+              << "\t → \t" << I << '\n');
+        bool onlyConst = true;
+        auto OP = I->op_begin(), E = I->op_end();
+        Value *v = OP->get();
+        DEBUG(dbgs() << "\t\tcomp \t" << v->getName());
+        DEBUG(dbgs() << "\t → \t" << v << '\n');
+        if(!isa<Constant>(v)){
+          addPropag(v);
+          addDependence(v,I);
+          onlyConst = false;
+        }
+        OP++;
+        for(;OP!=E;){
+          v = OP->get();
+          DEBUG(dbgs() << "\t\toperand \t" << v->getName());
+          DEBUG(dbgs() << "\t → \t" << v << '\n');
+          if(!isa<Constant>(v)){
+            addPropag(v);
+            addDependence(make_pair(v,I),PROP);
+            onlyConst = false;
+          }
+          OP++;
+        } //End for operands in I
+        if(onlyConst) // If only const operands it's a Init
+          addInit(I);
+      }
+      else if (isa<BinaryOperator>(I) || isa<CastInst>(I) || 
                isa<GetElementPtrInst>(I) || isa<CmpInst>(I) ||
                isa<InsertElementInst>(I) || isa<ExtractElementInst>(I) ||
                isa<ShuffleVectorInst>(I) || isa<ExtractValueInst>(I) ||
@@ -271,22 +377,41 @@ namespace llvm {/*{-{*/
     }
 
     Relation(VSet variables) {
+      addVariables(variables);
       for (auto VV = variables.begin(), E = variables.end(); VV != E; ++VV) {
         Value* V = *VV;
         instructions.insert(V);
-        addPropag(V);
+        /* addPropag(V); */
       }
       peeled = false;
       branch = false;
       anchor = false;
     }
 
-    /// Propagation of a value 
-    ///
-    void addPropag(Value* v){
-      propag.insert(v);
-      variables.insert(v);
+    Relation* copyRel(Relation *r){
+      Relation* res = new Relation(r->variables);
+      res->dep = DepMap(r->dep);
+      return res;
     }
+
+    Relation* extendRelation(Relation* r, VSet variables) {
+      Relation* res = copyRel(r);
+      VSet disj;
+      for (auto V : variables) {
+        if(!r->variables.count(V))
+          disj.insert(V);
+      }
+      res->addVariables(disj);
+      for (auto V : disj) {
+        res->addPropag(V);
+      }
+
+      res->setPeeled(false);
+      res->setBranch(false);
+      res->setAnchor(false);
+      return res;
+    }
+
 
     /// Add Value to variables
     ///
@@ -294,23 +419,46 @@ namespace llvm {/*{-{*/
       variables.insert(v);
     }
 
+    /// Propagation of a value 
+    ///
+    void addPropag(Value* v){
+      Arrow X = make_pair(v,v);
+      if(dep.count(X)) // If exists arrow v → v
+        dep[X] = Plus[dep[X]][PROP]; // Add a Propagation regarding to Plus
+      else dep[X] = PROP;
+      addVariable(v);
+    }
+
+
     /// Add Direct Dependence x = y … y → x
     ///
     void addDependence(Value* v1, Value* v2){
-      if(!dep.count(v1)){
-        VSet spt;
-        dep[v1] = spt;
-      }
-      dep[v1].insert(v2);
+      Arrow X = make_pair(v1,v2);
+      Arrow O = make_pair(v2,v2);
+      // Remove propagation
+      if(dep.count(O))
+        dep.erase(O);
+      if(dep.count(X)) // If exists arrow v1 → v2
+        dep[X] = Plus[dep[X]][STRO]; // Add a Propagation regarding to Plus
+      else dep[X] = STRO;
       // Add new potentially variables
       addVariable(v1);
-      in.insert(v1);
       addVariable(v2);
-      out.insert(v2);
-      // No propagation anymore…
-      propag.erase(v2);
     }
 
+
+    void addDependence(Arrow X, DepType depType){
+      Arrow O = make_pair(X.second,X.second);
+      // Remove propagation
+      if(dep.count(O))
+        dep.erase(O);
+      if(dep.count(X)) // If exists arrow v1 → v2
+        dep[X] = Plus[dep[X]][depType]; // Add a Propagation regarding to Plus
+      else dep[X] = depType;
+      // Add new potentially variables
+      addVariable(X.first);
+      addVariable(X.second);
+    }
 
     void addOut(VSet s){
       for (auto VV = s.begin(), E = s.end(); VV != E; ++VV) {
@@ -333,152 +481,126 @@ namespace llvm {/*{-{*/
       }
     }
 
-    void removePropag(VSet s){
-      for (auto VV = s.begin(), E = s.end(); VV != E; ++VV) {
-        Value* V = *VV;
-        propag.erase(V);
-      }
-
-    }
-
-    /// Add Direct Dependencies x = y … y → x
-    ///
-    void addDependencies(VSet sIn, VSet sOut){
-      for (auto VV = sIn.begin(), E = sIn.end(); VV != E; ++VV) {
-        Value* V = *VV;
-        addDependencies(V,sOut);
-        // Keep a trace of in and out variables would save some computation time
-        // but use more space…
-        addOut(sOut);
-        in.insert(V);
-      }
-    }
-
-    /// Add Direct Dependencies x = y … y → x
-    ///
-    void addDependencies(Value* v1, VSet s){
-      if(!dep.count(v1)){
-        VSet spt(s);
-        dep[v1] = spt;
-      }
-      else 
-        dep[v1] = mergeVSet(dep[v1],s);
-      addVariables(s);
-      addOut(s);
-      in.insert(v1);
-
-      // No propagation anymore…
-      removePropag(dep[v1]);
-    }
-
     /// Add Initialisation x = 42 … x x
     ///
     void addInit(Value* v){
-      // All hold direct dep removed
-      dep.erase(v);
-      // No propagation anymore…
-      propag.erase(v);
-      // Add in init
-      init.insert(v);
+      Arrow X = make_pair(v,v);
+      // Remove propagation
+      for(auto D1 : dep){ //= dep.begin(), D1E = dep.end(); D1 != D1E; ++D1){
+        Arrow R1 = D1.first;
+        DepType dType = D1.second;
+        if(v == R1.second)
+          dep.erase(X);
+      }
+      /* if(dep.count(X)) */
+      /*   dep.erase(X); */
+      /* if(dep.count(X)) // If exists arrow v → v */
+      /*   dep[X] = Plus[dep[X]][EMPT]; // Add a Propagation regarding to Plus */
+      /* else dep[X] = EMPT; */
+      /* dep[X] = EMPT; */
+      // Add new variable
       addVariable(v);
-      out.insert(v);
-    }
 
+      // Should we remove all old dependencies? NO
+      /* dep.erase(v); */
+    }
 
     /// dump - For debugging purposes, dumps a dependence to OS.
     ///
     void dump(raw_ostream &OS){
       DEBUG(dbgs() << "\n---- dumpRelation ----\n ");
-      /* OS << "Instructions:" << '\n'<< '\t'; */
-      /* if(!instructions.empty()){ */
-      /*   for (auto VV = instructions.begin(), E = instructions.end(); VV != E; ++VV) { */
-      /*     Value* V = *VV; */
-      /*     if(Instruction *I = dyn_cast<Instruction>(V)){ */
-      /*       OS << "(instruction:"<< I << ':' << *I << ")\n"; */
-      /*     } */
-      /*     else if(BasicBlock* B = dyn_cast<BasicBlock>(V)){ */
-      /*       OS << "(BasicBlock:"<< B << ":\n" << *B << ")\n"; */
-      /*     } */
-      /*     else { */ 
-      /*     OS << '(' << V << ':' << V->getName() << "),"; */
-      /*     } */
-      /*   } */
-      /* } */
       OS << "\nVariables:" << '\n'<< '\t';
       printValues(variables,OS);
       OS << "Dependencies:" << '\n';
-      for(auto DD = dep.begin(), DE = dep.end(); DD != DE;){
-        Value* v = DD->first;
-        VSet spt = DD->second;
-        OS << '\t' << v->getName() << ":";
-        printValues(spt,OS);
-        DD++;
-      }
-      OS << "Propagations:" << '\n'<< '\t';
-      printValues(propag,OS);
-      OS << "Init:" << '\n'<< '\t';
-      printValues(init,OS);
+      printDepTypes(dep,OS);
+      OS << "Ins:" << '\n';
+      printValues(getIn(),OS);
+      OS << "Outs:" << '\n';
+      printValues(getOut(),OS);
       DEBUG(dbgs() << "----------------------\n ");
+    }
+
+    void showArrow(Arrow A){
+      DEBUG(dbgs() << A.first->getName() << ':' << A.second->getName() << '\n');
     }
 
     /// Composition with r2
     /// 
     Relation* composition(Relation* r2){
-      /* DEBUG(dbgs() << " Composition is called… " << '\n'); */
+      DEBUG(dbgs() << " Composition is called… " << '\n');
       if(variables.empty())
         return r2;
       if(r2->variables.empty())
         return this;
-      Relation* comp = new Relation(mergeVSet(variables,r2->variables));
-      comp->setInit(mergeVSet(init,r2->init));
+
+      Relation* R1 = extendRelation(this,r2->variables);
+      Relation* R2 = extendRelation(r2,variables);
+      /* DEBUG(dbgs() << " R1 : " << '\n'); */
+      /* DEBUG(R1.dump(dbgs())); */
+      /* DEBUG(dbgs() << " R2 : " << '\n'); */
+      /* DEBUG(R2->dump(dbgs())); */
+
+      Relation* comp = new Relation(R1->variables);
       if(isAnchor() || r2->isAnchor())
         comp->setAnchor(true);
       comp->instructions = mergeVSet(instructions,r2->instructions);
-      // For each dependence in r2
-      for(auto D2 = r2->dep.begin(), D2E = r2->dep.end(); D2 != D2E; ++D2){
-        Value* X2 = D2->first;
-        VSet spt2 = D2->second;
-        /* DEBUG(dbgs() << " Composition de "  << '\t' << X2->getName() << ":"); */
-        /* DEBUG(printValues(spt2,dbgs())); */
-        /* DEBUG(dbgs() << " Mes variables "  << '\n'); */
-        /* DEBUG(printValues(variables,dbgs())); */
-        if(!variables.count(X2)){ // Not in r1 variables
-          /* DEBUG(dbgs() << " X2 not in R1 vars…" << '\n'); */
-          comp->addDependencies(X2,spt2); // All dep are taken
-          /* DEBUG(printValues(comp->dep[X2],dbgs())); */
-        }
-        else if(propag.count(X2)) // In propag
-          comp->addDependencies(X2,spt2); // All dep are taken
-        for(auto D1 = dep.begin(), D1E = dep.end(); D1 != D1E; ++D1){
-          Value* X1 = D1->first;
-          VSet spt1 = D1->second;
-          for (auto YY = spt1.begin(), YE = spt1.end(); YY != YE; ++YY) {
-            Value* Y1 = *YY;
-            if(X2 == Y1){
-              comp->addDependencies(X1,spt2);
-              comp->addDependence(X1,Y1);
-              comp->propag.erase(X2);
-              continue;
-            }
-            else if(!r2->variables.count(Y1)){
-              comp->addDependence(X1,Y1);
-              continue;
-            } else if(r2->propag.count(Y1)){
-              comp->addDependence(X1,Y1);
-              continue;
-            }
+  
+      for(auto D1 : R1->dep){
+        Arrow A1 = D1.first;
+        /* showArrow(A1); */
+        DepType dType = D1.second;
+          Value* X1 = A1.first;
+          Value* Y1 = A1.second;
+          for(auto D2 : R2->dep){ 
+            // Better way ? ↓
+            /* Arrow R2 = make_pair(Y1,Y2); */
+            /* showArrow(R2); */
+            /* if(R2->dep.count(R2)){ */
+            /*   Arrow New = make_pair(X1,Y2); */
+            /*   DepType newType = Time[R1->dep[New]][R2->dep[New]]; */
+            /*   if(comp->dep.count(New)) // Take the sum */
+            /*     comp->dep[New] = Plus[newType][comp->dep[New]]; */
+            /*   else comp->dep[New] = newType; */
+            /* } else { */
+            /*   if(!variables.count(Y2)) // Case there is no Y2 in r1 */
+            /*     comp->dep[R2] = R2->dep[R2]; */
+            /* } */
+              
+            Arrow A2 = D2.first;
+            /* showArrow(A2); */
+            DepType dType = D2.second;
+            Value* X2 = A2.first;
+            Value* Y2 = A2.second;
+            int sizeB = R2->dep.size();
+            if(Y1 == X2){ // X1 → Y1/X2 → Y2
+              Arrow New = make_pair(X1,Y2);
+              DepType newType = Time[R1->dep[A1]][R2->dep[A2]];
+              if(comp->dep.count(New)) // Take the sum
+                comp->addDependence(New,Plus[newType][comp->dep[New]]);
+              else comp->addDependence(New,newType);
+            } 
+            if(R2->dep.size() != sizeB)
+              DEBUG(dbgs() << " ERROR: r2 should not be changed here!" << '\n');
           }
-        }
       }
       return comp;
+    }
+
+    Relation* addDependencies(VSet in, VSet out){
+      for(Value* i : in){
+        for(Value* o : out){
+          Arrow A = make_pair(i,o);
+          if(dep.count(A)) // Take the sum
+            dep[A] = Plus[dep[A]][STRO];
+          else dep[A] = STRO;
+        }
+      }
     }
 
     Relation* sumRelation(Relation* r2){
       Relation* sum = new Relation(variables);
       sum->setVariables(mergeVSet(variables,r2->variables));
-      sum->setPropag(mergeVSet(propag,r2->propag));
-      sum->setDep(mergeDep(dep,r2->dep));
-      sum->setInit(mergeVSet(init,r2->init));
+      sum->setDep(plusDep(dep,r2->dep));
 
       if(isAnchor() || r2->isAnchor())
         sum->setAnchor(true);
@@ -502,41 +624,139 @@ namespace llvm {/*{-{*/
         return false;
       // All dep of this
       for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
-        Value* v= D->first;
+        Arrow v= D->first;
         if(!r2->dep.count(v))
           return false;
-        VSet s= D->second;
-        if(!isEqual(s,r2->dep[v]))
+        if(D->second != r2->dep[v])
           return false;
       }
       return true;
     }
 
-    // TODO We can optimize that by feeding in and out set when adding depends
-    VSet getOut(){
-      VSet out(init); // All initializations are out variables
+    VSet getPropFor(Value* X){
+      VSet prop;
       for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
-        out = mergeVSet(out,D->second);
+        Arrow X1 = D->first;
+        DepType dType = D->second;
+        if(X1.second == X)
+          if(dType == PROP || dType == TOTA)
+            prop.insert(X1.first);
+      }
+      return prop;
+    }
+
+    DepMapVars getPropMap(){
+      DepMapVars dmv;
+      VSet prop;
+      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
+        Arrow X1 = D->first;
+        DepType dType = D->second;
+        if(dType == PROP || dType == TOTA){
+          if(dmv.count(X1.second)){
+            VSet n;
+            n.insert(X1.first);
+            dmv[X1.second] = n; 
+          } else dmv[X1.second].insert(X1.first);
+        }      
+      }
+      return dmv;
+    }
+
+    std::pair<VSet,VSet> getOutProp(){
+      VSet out;
+      VSet ys;
+      VSet prop;
+      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
+        Arrow X1 = D->first;
+        ys.insert(X1.second);
+        DepType dType = D->second;
+        if(dType != PROP){
+          out.insert(X1.second);
+        } else {
+          if(X1.first != X1.second){
+            out.insert(X1.second);
+            prop.insert(X1.second);
+          }
+        }
+      }
+      for (auto V : variables) {
+        if(!ys.count(V))
+          out.insert(V);
+      }
+      return make_pair(out,prop);
+    }
+
+    bool isStrong(Value* X){
+      if(dep.empty())
+        return false;
+      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
+        Arrow X1 = D->first;
+        if(X1.second == X){
+          DepType dType = D->second;
+          if(dType == STRO || dType == TOTA)
+            return true;
+        }
+      }
+      return false;
+    }
+
+    bool isOnlyProp(Value* X){
+      bool found = false;
+      bool reinit = true;
+      if(dep.empty())
+        return false;
+      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
+        Arrow X1 = D->first;
+        if(X1.second == X){
+          reinit = false;
+          DepType dType = D->second;
+          if(dType == STRO || dType == TOTA)
+            return false;
+          if(found)
+            return false;
+          else found = true;
+        }
+      }
+      if(reinit)
+        return false;
+      return true;
+    }
+
+    VSet getOut(){
+      VSet out;
+      VSet ys;
+      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
+        Arrow X1 = D->first;
+        ys.insert(X1.second);
+        DepType dType = D->second;
+        if(dType != PROP){
+          out.insert(X1.second);
+        } else {
+          if(X1.first != X1.second)
+            out.insert(X1.second);
+        }
+      }
+      for (auto V : variables) {
+        if(!ys.count(V))
+          out.insert(V);
       }
       return out;
     }
 
     VSet getIn(){
       VSet in;
+      VSet ys;
       for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
-        in.insert(D->first);
+        Arrow X1 = D->first;
+        DepType dType = D->second;
+        if(dType != PROP){
+          in.insert(X1.first);
+        } else {
+          if (X1.first != X1.second)
+            in.insert(X1.first);
+        }
       }
       return in;
-    }
-
-    std::pair<VSet,VSet> getInOut(){
-      VSet out(init); // All initializations are out variables
-      VSet in;
-      for(auto D = dep.begin(), DE = dep.end(); D != DE; ++D){
-        in.insert(D->first);
-        out = mergeVSet(out,D->second);
-      }
-      return std::make_pair(in, out);
     }
 
     /* std::pair<VSet,VSet> getInOut(){ */
@@ -604,10 +824,11 @@ namespace llvm {/*{-{*/
     VSet variables;
     VSet in;
     VSet out;
-    VSet propag;
+    /* VSet propag; */
+    /* DepMap dep; */
     DepMap dep;
     /* DenseMap<Value*,VSet> dep; */
-    VSet init;
+    /* VSet init; */
     bool peeled;
     bool anchor;
     BasicBlock* Start;
@@ -774,22 +995,24 @@ namespace llvm {/*{-{*/
                                              AliasAnalysis *AA);
   };
 
-  VSet searchForRelationsWithVAsOutput(Value* V, MapRel* mapRel){
-    VSet relations;
-    for(auto R = mapRel->begin(), RE = mapRel->end(); R != RE; ++R){
-      // Does that save some time?
-      if(R->first == V)
-        relations.insert(R->first);
-      else
-        if(R->second->getOut().count(V))
-          relations.insert(R->first);
+  static void dumpOC( std::vector<Value*> *OC){
+    for(Value* I : *OC){
+      DEBUG(dbgs() << *I << ";\n");
     }
-    return relations;
+  }
+
+  static void dumpDependences(Value* I, DepMapChunks* depMap){
+    DEBUG(dbgs() << "List of dep relations for " << *I << '\n');
+    std::vector<Value*> OR = (*depMap)[I];
+    DEBUG(dbgs() << " ------------ " << '\n');
+    for(Value* VR : OR)
+      DEBUG(dbgs() << *VR << '\n');
+    DEBUG(dbgs() << " ------------ " << '\n');
   }
 
   static void dumpMapDegOfOC(MapChunk *mapChunk, MapDeg* mapDeg,
                              std::vector<Value*> *OC, raw_ostream &OS){
-    DEBUG(dbgs() << "\n---- MapDegOfOC ----\n ");
+    DEBUG(dbgs() << "\n---- MapDegOfOC ----\n");
     for(Value* I : *OC){
       DEBUG(dbgs() << "Compute Deg for : " << *I << " = ");
       DEBUG(dbgs() << (*mapDeg)[I]);
@@ -913,7 +1136,7 @@ namespace llvm {/*{-{*/
 
   // Return the good relation from phi regarding to the BasicBlocks From and To
   static Relation* getPHIRelations(BasicBlock* From, BasicBlock* To, MapRel*
-                                   mapRel){
+                                   mapRel, std::vector<Value*> *OC){
     DEBUG(dbgs() << "In getPHIRelations : " << '\n');
     /* Relation *RB = new Relation(To); */
     Relation *RB = new Relation();
@@ -927,6 +1150,7 @@ namespace llvm {/*{-{*/
         (*mapRel)[&I] = RI;
         DEBUG(RI->dump(dbgs()));
         DEBUG(dbgs() << " Composition…" << '\n');
+        OC->push_back(&I);
         RB = RB->composition(RI);
         DEBUG(RB->dump(dbgs()));
       }
@@ -941,7 +1165,8 @@ namespace llvm {/*{-{*/
 
 
   // Return the good relation from phi going from the body to the header
-  static Relation* getPHIRelations(Loop* L, MapRel* mapRel, bool WantIn){
+  static Relation* getPHIRelations(Loop* L, MapRel* mapRel, bool WantIn,
+                                   std::vector<Value*> *OC){
     BasicBlock* BB = L->getHeader();
     DEBUG(dbgs() << "In getPHIRelations : " << '\n');
     /* Relation *RB = new Relation(BB); */
@@ -954,6 +1179,7 @@ namespace llvm {/*{-{*/
         Relation *RI = new Relation(PHI,L,WantIn);
         // Save relation with instruction
         (*mapRel)[&I] = RI;
+        OC->push_back(&I);
         DEBUG(RI->dump(dbgs()));
         DEBUG(dbgs() << " Composition…" << '\n');
         RB = RB->composition(RI);
