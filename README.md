@@ -70,16 +70,15 @@ times and hoists ~1500 instructions less than at `-O3`.
 6824 | number of quasi-invariants *Instructions*
 43 | number of chunks with invariance degree >= 2
 
-We can suppose that over half of the times `licm` is performed, we
-find 6824 quasi-invariants instructions which is ~85% of the total
-invariants hoisted by `licm`. Plus we found 808 quasi-invariants
-chunks.
-
 ## Remarks
 
 Note that there are some restrictions on the form of the loop: some of
 the loops with several exit blocks, latches, rotated or without header
-are not analyzed.  See that ~50% of the time, loops are not analyzed
-in the previous statistics, this is why results are biased (it's
-probably more). We are currently working for the flexibility of our
-analysis.
+are not analyzed.  In the previous statistics it's ~50% of the time,
+this is why results are biased.
+
+Over only half of the loop analyzes `licm` performs, we find 6824
+quasi-invariants instructions (~85% of the total invariants currently
+hoisted by `licm`). We can suppose that over all loop analyzes we
+should find more instructions than `licm`.  We are currently working
+for the flexibility of our analysis.
