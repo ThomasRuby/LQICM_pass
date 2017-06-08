@@ -75,7 +75,28 @@ bool myCanSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
   // Loads have extra constraints we have to verify before we can hoist them.
   // FIXME
   if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
-    return false;
+    if (!LI->isUnordered())
+      return false; // Don't hoist volatile/atomic loads!
+
+    // Loads from constant memory are always safe to move, even if they end up
+    // in the same alias set as something that ends up being modified.
+    if (AA->pointsToConstantMemory(LI->getOperand(0)))
+      return true;
+    if (LI->getMetadata(LLVMContext::MD_invariant_load))
+      return true;
+
+    // Don't hoist loads which have may-aliased stores in loop.
+    uint64_t Size = 0;
+    if (LI->getType()->isSized())
+      Size = I.getModule()->getDataLayout().getTypeStoreSize(LI->getType());
+
+    AAMDNodes AAInfo;
+    LI->getAAMetadata(AAInfo);
+
+    bool Invalidated =
+        pointerInvalidatedByLoop(LI->getOperand(0), Size, AAInfo, CurAST);
+
+    return !Invalidated;
   } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
     // Don't sink or hoist dbg info; it's legal, but not useful.
     if (isa<DbgInfoIntrinsic>(I))
@@ -122,9 +143,9 @@ bool myCanSinkOrHoistInst(Instruction &I, AAResults *AA, DominatorTree *DT,
 
   // Only these instructions are hoistable/sinkable. FIXME
   if (!isa<BinaryOperator>(I) && !isa<CastInst>(I) && !isa<SelectInst>(I) &&
-      !isa<CmpInst>(I) &&
-      /* !isa<InsertElementInst>(I) && !isa<ExtractElementInst>(I) && */
-      /* !isa<ShuffleVectorInst>(I) && !isa<ExtractValueInst>(I) && */
+      !isa<GetElementPtrInst>(I) && !isa<CmpInst>(I) &&
+      !isa<InsertElementInst>(I) && !isa<ExtractElementInst>(I) &&
+      !isa<ShuffleVectorInst>(I) && !isa<ExtractValueInst>(I) &&
       !isa<InsertValueInst>(I))
     return false;
 
@@ -144,7 +165,7 @@ static Relation* computeRelation(BasicBlock* BB, MapDeg* mapDeg , MapRel*
                                  mapRel, AliasAnalysis *AA, DominatorTree
                                  *DT,Loop *CurLoop,AliasSetTracker *CurAST,
                                  LoopSafetyInfo *SafetyInfo, std::vector<Value*>
-                                 *OC){
+                                 *OC, bool isExiting){
     Relation *RB = new Relation(BB);
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E;) {
       Instruction &I = *II++;
@@ -171,7 +192,7 @@ static Relation* computeRelation(BasicBlock* BB, MapDeg* mapDeg , MapRel*
         (*mapDeg)[&I]=0;
       else {
         (*mapDeg)[&I]=-1;
-        if(!isa<BranchInst>(&I))
+        if(!isa<BranchInst>(&I) || isExiting)
           RB->setAnchor(true);
       }
       OC->push_back(&I);
@@ -285,6 +306,10 @@ static int computeDeg(Chunk* chunk, Value* I, DominatorTree *DT, Value *head,
       Relation* RI = (*mapRel)[I];
       DEBUG(dbgs() << "\tRelation found: " << '\n');
       DEBUG(RI->dump(dbgs()));
+      /* if(RI->isAnchor()){ */
+      /*   DEBUG(dbgs() << "\tIS ANCHOR! " << '\n'); */
+      /*   return -1; */ 
+      /* } */
       int deg = 1;
       if(RI->getDep().empty()){ // Empty dep
         if(isa<PHINode>(I) && isa<BasicBlock>(head)){
@@ -578,6 +603,7 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
   Relation *RB = new Relation();
 
   if(BB == End){
+    EndUnexpected++;
     DEBUG(errs() << "ERROR ---- BB = End it shouldn't be! \n");
     return nullptr;
   }
@@ -602,7 +628,9 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
   if (!CurLoop->contains(BB)){
     DEBUG(dbgs() << "---- Not In Current Loop " << '\n');
     // Return empty Relation
-    return RB;
+    BBNotInCurrentLoop++;
+    /* return RB; */
+    return nullptr;
   }
 
   // This case find the LoopRelation if the Block encountered is an inner Loop/*{-{*/
@@ -620,14 +648,14 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
         if(!(*mapChunk)[InnerHead]){
           DEBUG(errs() << " ERROR! Inner Loop non analyzed → abort" <<
                 InnerHead->getName() <<'\n');
-
+          InnerLoopNotAnalysed++;
           return nullptr;
         } else {
-
           Chunk* innerLoopChunk = (*mapChunk)[InnerHead];
           if(innerLoopChunk->getType() == Chunk::ERROR){
             DEBUG(dbgs() << " ERROR! Relation not found for Loop with Head = " <<
                   InnerHead <<'\n');
+            InnerLoopNotAnalysed++;
             // FIXME should throw an exception or just stop the analysis here
             return nullptr;
           }
@@ -637,7 +665,10 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
           (*currentChunk->getMapRel())[InnerHead] = innerLoopChunk->getRel();
 
           // Initialization: we suppose the loop is hoistable
-          (*currentChunk->getMapDeg())[InnerHead] = 0;
+          if(innerLoopChunk->isAnchor())
+            (*currentChunk->getMapDeg())[InnerHead] = -1;
+          else
+            (*currentChunk->getMapDeg())[InnerHead] = 0;
 
           OC->push_back(InnerHead); // FIXME redo OC regarding to chunks
           RL = RL->composition(innerLoopChunk->getRel());
@@ -700,7 +731,10 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
             bb->getName() <<'\n');
       /* DEBUG(newChunk->getRel()->dump(dbgs())); */
       // Initialization of deg of the peeled chunk in the current chunk
-      (*currentChunk->getMapDeg())[bb] = 0;
+      if(newChunk->isAnchor())
+        (*currentChunk->getMapDeg())[bb] = -1;
+      else
+        (*currentChunk->getMapDeg())[bb] = 0;
       (*currentChunk->getMapRel())[bb] = newChunk->getRel();
 
       OC->push_back(bb); // FIXME redo OC regarding to chunks
@@ -743,197 +777,226 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
   }/*}-}*/
 
   DEBUG(dbgs() << " INFO: In chunk :" << currentChunk->getName() << '\n');
-  if(CurLoop->isLoopExiting(BB)){
-    DEBUG(errs() << " ERROR: Loop form not managed yet… " << BB->getName() << '\n');
-    return nullptr;
-  }
 
-  // If normal BB compute the corresponding relation
-  RB = computeRelation(BB, mapDeg, mapRel, AA, DT,
-                       CurLoop, CurAST, SafetyInfo, OC);
+  bool isExiting = false;
+  // TODO Try to consider when the current block is exiting…
+  if(CurLoop->isLoopExiting(BB)){
+    // If exiting BB, compute the corresponding relation with "break" as an
+    // anchor
+    RB = computeRelation(BB, mapDeg, mapRel, AA, DT,
+                         CurLoop, CurAST, SafetyInfo, OC, true);
+    isExiting = true;
+  } else {
+    // If normal BB compute the corresponding relation
+    RB = computeRelation(BB, mapDeg, mapRel, AA, DT,
+                         CurLoop, CurAST, SafetyInfo, OC, false);
+  }
 
   // If there are several successors… if then else…
   TerminatorInst *TInst = BB->getTerminator();
   unsigned nbSucc = TInst->getNumSuccessors();
+
+  BasicBlock* Succ = nullptr;
+  if(isExiting && nbSucc==2){
+    BasicBlock *Then = TInst->getSuccessor(0);
+    BasicBlock *Else = TInst->getSuccessor(1);
+    if(CurLoop->contains(Then))
+      Succ = Then;
+    else if(CurLoop->contains(Else))
+      Succ = Else;
+    else {//FIXME maybe if both are going in while.end we can say it's a latch?
+      ForkWithTwoBreak++;
+      DEBUG(errs() << " ERROR: Loop form not managed yet… " << BB->getName() << '\n');
+      return nullptr;
+    }
+    nbSucc = 1;
+  } else if (nbSucc==1){
+    if(isExiting)
+      Succ = End;
+    else
+      Succ = BB->getUniqueSuccessor();
+  }
+
   // TODO if more than 2 we should manage by checking the commonPostDominator
   // and compute the sum anyway
   // FIXME Maybe using BranchInst information
   if(nbSucc==2){
     BasicBlock *Then = TInst->getSuccessor(0);
     BasicBlock *Else = TInst->getSuccessor(1);
-      if(isWellFormedFork(Then,Else,CurLoop,PDT,DT)){
-        BasicBlock *IfEnd = PDT->findNearestCommonDominator(Then,Else);
-        DEBUG(dbgs() << " INFO: Exit If Block of if is :" << IfEnd->getName() <<
-              '\n');
+    if(isWellFormedFork(Then,Else,CurLoop,PDT,DT)){
+      BasicBlock *IfEnd = PDT->findNearestCommonDominator(Then,Else);
+      DEBUG(dbgs() << " INFO: Exit If Block of if is :" << IfEnd->getName() <<
+            '\n');
 
-        if(!CurLoop->contains(IfEnd)){
-          DEBUG(errs() << " ERROR: Exit If Block out of the loop! \n");
-          return nullptr;
-        }
-
-        // No deg computed inside. Only the relation of if matters
-        // One Relation for each branch
-        // DEPRECATED
-        /* MapRel *mapThenRel = new MapRel(); */
-        /* MapRel *mapElseRel = new MapRel(); */
-        std::vector<Value*> OCif;
-
-        Value* VThen = dyn_cast<Value>(Then);
-        Value* VElse = dyn_cast<Value>(Else);
-        
-        // Every relations of the branches will be in the corresponding map
-        Chunk* ThenChunk = new Chunk(Then->getName()); // Creates mapRel
-        ThenChunk->setStart(Then);
-        ThenChunk->setEnd(IfEnd);
-        ThenChunk->setType(Chunk::BRANCH);
-
-        Chunk* ElseChunk = new Chunk(Else->getName()); // Creates mapRel
-        ElseChunk->setStart(Else);
-        ElseChunk->setEnd(IfEnd);
-        ElseChunk->setType(Chunk::BRANCH);
-
-        // DEPRECATED
-        /* (*mapChunkRel)[VThen] = mapThenRel; */
-        /* (*mapChunkRel)[VElse] = mapElseRel; */
-
-        // it could have some phi to take into account! IMPORTANT
-        DEBUG(dbgs() << " Computing RThenPHI : " << Then->getName() << " to " <<
-              IfEnd->getName() << '\n');
-        Relation *RThenPHI = new Relation();
-        if(Then != IfEnd)
-          RThenPHI = getPHIRelations(BB,Then,mapRel,OC);
-
-        DEBUG(dbgs() << " Computing RElsePHI : " << Then->getName() << " to " <<
-              IfEnd->getName() << '\n');
-        Relation *RElsePHI = new Relation();
-        if(Else != IfEnd)
-          RElsePHI = getPHIRelations(BB,Else,mapRel,OC);
-
-
-        // Recursive call on each branch
-        Relation* RThen = new Relation();
-        DEBUG(dbgs() << " Computing RThen : " << Then->getName() << " to " <<
-              IfEnd->getName() << '\n');
-
-        // DEPRECATED
-        /* RThen->setStart(Then); */
-        /* RThen->setEnd(IfEnd); */
-        /* RThen->setBranch(true); */
-        if(Then != IfEnd){
-          (*mapChunk)[VThen] = ThenChunk;
-          RThen = computeRelationBBInLoop(Then, IfEnd, RPHI, mapChunk,
-                                          ThenChunk, AA, LI, DT, CurLoop,
-                                          CurAST, SafetyInfo, DI, PDT, &OCif);
-        }
-        if(!RThen){
-          DEBUG(errs() << " ERROR in RThen of: " << Then->getName() << '\n');
-          ThenChunk->setType(Chunk::ERROR);
-          return nullptr;
-        }
-        DEBUG(dbgs() << " Then : " << Then->getName() << '\n');
-        DEBUG(RThen->dump(dbgs()));
-        ThenChunk->setRel(RThen);
-
-        Relation* RElse = new Relation();
-        // DEPRECATED
-        /* RElse->setStart(Else); */
-        /* RElse->setEnd(IfEnd); */
-        /* RElse->setBranch(true); */
-        DEBUG(dbgs() << " Computing RElse : " << Else->getName() << " to " <<
-              IfEnd->getName() << '\n');
-        if(Else != IfEnd){
-          (*mapChunk)[VElse] = ElseChunk;
-          RElse = computeRelationBBInLoop(Else, IfEnd, RPHI, mapChunk,
-                                          ElseChunk, AA, LI, DT, CurLoop,
-                                          CurAST, SafetyInfo, DI, PDT, &OCif);
-        }
-
-        if(!RElse){
-          DEBUG(errs() << " ERROR in RElse of: " << Else->getName() << '\n');
-          ElseChunk->setType(Chunk::ERROR);
-          return nullptr;
-        }
-        DEBUG(dbgs() << " Else : " << Else->getName() << '\n');
-        DEBUG(RElse->dump(dbgs()));
-        ElseChunk->setRel(RElse);
-
-        // Add Phi entries
-        DEBUG(dbgs() << " Composition RThenPHI ↓ " << Then->getName());
-        DEBUG(RThenPHI->dump(dbgs()));
-        DEBUG(dbgs() << " With RThen ↓ " << Then->getName());
-        DEBUG(RThen->dump(dbgs()));
-        RThen = RThenPHI->composition(RThen);
-
-        DEBUG(dbgs() << " Composition RElsePHI ↓ " << Else->getName());
-        DEBUG(RElsePHI->dump(dbgs()));
-        DEBUG(dbgs() << " With RElse ↓ " << Else->getName());
-        DEBUG(RElse->dump(dbgs()));
-        RElse = RElsePHI->composition(RElse);
-        
-        
-        Relation *RFork = new Relation();
-        RThen->setEnd(IfEnd);
-        RThen->setBranch(true);
-        
-        // Sum branchs
-        RFork = RFork->composition(RThen->sumRelation(RElse));
-
-        // Here RB is the relation of the If but we need to add conditions dep
-        Relation *RCMP = getCondRelationsFromBB(BB,mapRel);
-        if(RCMP)
-          RFork->addDependencies(RCMP->getIn(),RFork->getOut());
-
-        DEBUG(dbgs() << " FINAL Branch from " << TInst << '\n');
-        DEBUG(RFork->dump(dbgs()));
-
-        (*mapDeg)[TInst] = 0;
-        (*mapRel)[TInst] = RFork;
-        // Is this useless?
-        // The sum will be added here, key = to TInst
-        // FIXME Should we take the entire block with the TInst in the chunk?
-        Chunk* branChunk = new Chunk(TInst->getName());
-        branChunk->setStart(BB);
-        branChunk->setEnd(IfEnd);
-        branChunk->setRel(RFork);
-        branChunk->setDegree(0);
-        // usefull ? ↓
-        (*branChunk->getMapRel())[VThen] = RThen;
-        (*branChunk->getMapRel())[VElse] = RElse;
-      
-        (*mapChunk)[TInst] = branChunk;
-        /* (*mapChunkRel)[TInst] = new MapRel(); */
-        /* (*(*mapChunkRel)[TInst])[TInst] = RFork; */
-
-        RB = RB->composition(RFork);
-
-        if(IfEnd != End){
-          Relation* Rcontinue = computeRelationBBInLoop(IfEnd, End, RPHI,
-                                                        mapChunk, currentChunk,
-                                                        AA, LI, DT, CurLoop,
-                                                        CurAST, SafetyInfo, DI,
-                                                        PDT, OC);
-          if(!Rcontinue){
-            DEBUG(dbgs() << " ERROR in Rcontinue of: " << IfEnd << '\n');
-            return nullptr;
-          }
-
-          // Continue with the if.end block
-          RB = RB->composition(Rcontinue);
-        } else{
-          // If there is some phi in End take into account here the assignements
-          // If it's the header of the current loop, they are already computed
-          if(End == CurLoop->getHeader())
-            RB = RB->composition(RPHI);
-        }
+      if(!CurLoop->contains(IfEnd)){
+        BranchWithBreakUnexpected++;
+        DEBUG(errs() << " ERROR: Exit If Block out of the loop! \n");
+        return nullptr;
       }
-      else {
-        DEBUG(dbgs() << " WARN: Branch is not well formed for: " <<
-              BB->getName() <<'\n');
+
+      // No deg computed inside. Only the relation of if matters
+      // One Relation for each branch
+      // DEPRECATED
+      /* MapRel *mapThenRel = new MapRel(); */
+      /* MapRel *mapElseRel = new MapRel(); */
+      std::vector<Value*> OCif;
+
+      Value* VThen = dyn_cast<Value>(Then);
+      Value* VElse = dyn_cast<Value>(Else);
+
+      // Every relations of the branches will be in the corresponding map
+      Chunk* ThenChunk = new Chunk(Then->getName()); // Creates mapRel
+      ThenChunk->setStart(Then);
+      ThenChunk->setEnd(IfEnd);
+      ThenChunk->setType(Chunk::BRANCH);
+
+      Chunk* ElseChunk = new Chunk(Else->getName()); // Creates mapRel
+      ElseChunk->setStart(Else);
+      ElseChunk->setEnd(IfEnd);
+      ElseChunk->setType(Chunk::BRANCH);
+
+      // DEPRECATED
+      /* (*mapChunkRel)[VThen] = mapThenRel; */
+      /* (*mapChunkRel)[VElse] = mapElseRel; */
+
+      // it could have some phi to take into account! IMPORTANT
+      DEBUG(dbgs() << " Computing RThenPHI : " << Then->getName() << " to " <<
+            IfEnd->getName() << '\n');
+      Relation *RThenPHI = new Relation();
+      if(Then != IfEnd)
+        RThenPHI = getPHIRelations(BB,Then,mapRel,OC);
+
+      DEBUG(dbgs() << " Computing RElsePHI : " << Then->getName() << " to " <<
+            IfEnd->getName() << '\n');
+      Relation *RElsePHI = new Relation();
+      if(Else != IfEnd)
+        RElsePHI = getPHIRelations(BB,Else,mapRel,OC);
+
+
+      // Recursive call on each branch
+      Relation* RThen = new Relation();
+      DEBUG(dbgs() << " Computing RThen : " << Then->getName() << " to " <<
+            IfEnd->getName() << '\n');
+
+      // DEPRECATED
+      /* RThen->setStart(Then); */
+      /* RThen->setEnd(IfEnd); */
+      /* RThen->setBranch(true); */
+      if(Then != IfEnd){
+        (*mapChunk)[VThen] = ThenChunk;
+        RThen = computeRelationBBInLoop(Then, IfEnd, RPHI, mapChunk,
+                                        ThenChunk, AA, LI, DT, CurLoop,
+                                        CurAST, SafetyInfo, DI, PDT, &OCif);
       }
+      if(!RThen){
+        DEBUG(errs() << " ERROR in RThen of: " << Then->getName() << '\n');
+        ThenChunk->setType(Chunk::ERROR);
+        return nullptr;
+      }
+      DEBUG(dbgs() << " Then : " << Then->getName() << '\n');
+      DEBUG(RThen->dump(dbgs()));
+      ThenChunk->setRel(RThen);
+
+      Relation* RElse = new Relation();
+      // DEPRECATED
+      /* RElse->setStart(Else); */
+      /* RElse->setEnd(IfEnd); */
+      /* RElse->setBranch(true); */
+      DEBUG(dbgs() << " Computing RElse : " << Else->getName() << " to " <<
+            IfEnd->getName() << '\n');
+      if(Else != IfEnd){
+        (*mapChunk)[VElse] = ElseChunk;
+        RElse = computeRelationBBInLoop(Else, IfEnd, RPHI, mapChunk,
+                                        ElseChunk, AA, LI, DT, CurLoop,
+                                        CurAST, SafetyInfo, DI, PDT, &OCif);
+      }
+
+      if(!RElse){
+        DEBUG(errs() << " ERROR in RElse of: " << Else->getName() << '\n');
+        ElseChunk->setType(Chunk::ERROR);
+        return nullptr;
+      }
+      DEBUG(dbgs() << " Else : " << Else->getName() << '\n');
+      DEBUG(RElse->dump(dbgs()));
+      ElseChunk->setRel(RElse);
+
+      // Add Phi entries
+      DEBUG(dbgs() << " Composition RThenPHI ↓ " << Then->getName());
+      DEBUG(RThenPHI->dump(dbgs()));
+      DEBUG(dbgs() << " With RThen ↓ " << Then->getName());
+      DEBUG(RThen->dump(dbgs()));
+      RThen = RThenPHI->composition(RThen);
+
+      DEBUG(dbgs() << " Composition RElsePHI ↓ " << Else->getName());
+      DEBUG(RElsePHI->dump(dbgs()));
+      DEBUG(dbgs() << " With RElse ↓ " << Else->getName());
+      DEBUG(RElse->dump(dbgs()));
+      RElse = RElsePHI->composition(RElse);
+
+
+      Relation *RFork = new Relation();
+      RThen->setEnd(IfEnd);
+      RThen->setBranch(true);
+
+      // Sum branchs
+      RFork = RFork->composition(RThen->sumRelation(RElse));
+
+      // Here RB is the relation of the If but we need to add conditions dep
+      Relation *RCMP = getCondRelationsFromBB(BB,mapRel);
+      if(RCMP)
+        RFork->addDependencies(RCMP->getIn(),RFork->getOut());
+
+      DEBUG(dbgs() << " FINAL Branch from " << TInst << '\n');
+      DEBUG(RFork->dump(dbgs()));
+
+      (*mapDeg)[TInst] = 0;
+      (*mapRel)[TInst] = RFork;
+      // Is this useless?
+      // The sum will be added here, key = to TInst
+      // FIXME Should we take the entire block with the TInst in the chunk?
+      Chunk* branChunk = new Chunk(TInst->getName());
+      branChunk->setStart(BB);
+      branChunk->setEnd(IfEnd);
+      branChunk->setRel(RFork);
+      branChunk->setDegree(0);
+      // usefull ? ↓
+      (*branChunk->getMapRel())[VThen] = RThen;
+      (*branChunk->getMapRel())[VElse] = RElse;
+
+      (*mapChunk)[TInst] = branChunk;
+      /* (*mapChunkRel)[TInst] = new MapRel(); */
+      /* (*(*mapChunkRel)[TInst])[TInst] = RFork; */
+
+      RB = RB->composition(RFork);
+
+      if(IfEnd != End){
+        Relation* Rcontinue = computeRelationBBInLoop(IfEnd, End, RPHI,
+                                                      mapChunk, currentChunk,
+                                                      AA, LI, DT, CurLoop,
+                                                      CurAST, SafetyInfo, DI,
+                                                      PDT, OC);
+        if(!Rcontinue){
+          DEBUG(dbgs() << " ERROR in Rcontinue of: " << IfEnd << '\n');
+          return nullptr;
+        }
+
+        // Continue with the if.end block
+        RB = RB->composition(Rcontinue);
+      } else{
+        // If there is some phi in End take into account here the assignements
+        // If it's the header of the current loop, they are already computed
+        if(End == CurLoop->getHeader())
+          RB = RB->composition(RPHI);
+      }
+    }
+    else {
+      DEBUG(dbgs() << " WARN: Branch is not well formed for: " <<
+            BB->getName() <<'\n');
+    }
   }
-
   // If one Succ only
-  else if(BasicBlock* Succ = BB->getUniqueSuccessor()){
+  else if(Succ){
+
     // End conditions of recursive call:
     // Needs to have only one successor going to the End block
     if(Succ == End){
@@ -968,7 +1031,10 @@ static Relation* computeRelationBBInLoop(BasicBlock *BB, BasicBlock *End,
       RB = RB->composition(Rnext);
     }
   } else {
-    DEBUG(errs() << " ERROR Several successors for " << *BB << '\n');
+    DEBUG(errs() << " ERROR Several successors for with one exiting " << *BB << '\n');
+    DEBUG(errs() << " ERROR: Loop form not managed yet… " << BB->getName() << '\n');
+    WeirdTermination++;
+    return nullptr;
   }
 
   return RB;
@@ -987,34 +1053,33 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapChunk* mapChunk,
     BasicBlock* Head = CurLoop->getHeader();
     if(Value* head = dyn_cast<Value>(Head)){
 
-      // Check if there is not several exitblock here and abort if so
-      // We will consider this case in the futur! TODO
-      if(!CurLoop->getExitBlock()){
-        DEBUG(dbgs() <<"WARN: severals exitBlock → Abort");
-        NumLoopsManyExitB++;
-        Relation* RL = new Relation(Head);
-        return RL;
-      }
-
       if(!CurLoop->isLoopExiting(Head)){
         DEBUG(dbgs() <<"WARN: not well formed for this analysis → Abort");
-        NumLoopsManyExitB++;
-        Relation* RL = new Relation(Head);
-        return RL;
+        NumLoopsWithExitNotInHead++;
+        /* Relation* RL = new Relation(Head); */
+        /* return RL; */
+        return nullptr;
       }
 
       Chunk* loopChunk = (*mapChunk)[head];
 
       Relation *RPHI = getPHIRelations(CurLoop,loopChunk->getMapRel(),false,OC);
       BasicBlock *FirstBody = getFirstBodyOfLoop(CurLoop);
-      Relation *RL = computeRelationBBInLoop(FirstBody, Head, RPHI, mapChunk,
+      Relation *RL;
+      if(FirstBody!=Head)
+        RL = computeRelationBBInLoop(FirstBody, Head, RPHI, mapChunk,
                                              loopChunk, AA, LI, DT, CurLoop,
                                              CurAST, SafetyInfo, DI, PDT, OC);
+      else
+        RL = computeRelation(Head, loopChunk->getMapDeg(),
+                                       loopChunk->getMapRel(), AA, DT, CurLoop,
+                                       CurAST, SafetyInfo, OC, false);
       if(!RL){
         return nullptr;
       }
-      if(RL->isAnchor())
+      if(RL->isAnchor()){
         DEBUG(dbgs() << " This Loop contains an anchor " << '\n');
+      }
 
       // Take the while.end into account
       DEBUG(dbgs() << " Fixpoint…" << '\n');
@@ -1033,8 +1098,10 @@ static Relation* computeRelationLoop(DomTreeNode *N, MapChunk* mapChunk,
       /* (*(*mapChunkRel)[head])[head]=RL; */
 
       DepMapChunks depMap;
-      if(!computeDepChunks(loopChunk,OC,&depMap))
+      if(!computeDepChunks(loopChunk,OC,&depMap)){
+        ErrorInDep++;
         return nullptr;
+      }
 
       //get first not phi value of OC 
       Value* term = getFirstNonPHI(OC);
@@ -1102,6 +1169,7 @@ static void registerLQICMPass(const PassManagerBuilder &,
                               legacy::PassManagerBase &PM){
   PM.add(createPromoteMemoryToRegisterPass());
   PM.add(createIndVarSimplifyPass());
+  /* PM.add(createLoopUnrollPass()); */
   PM.add(createCFGSimplificationPass());
   PM.add(new AAResultsWrapperPass());
   PM.add(new DependenceAnalysisWrapperPass());
@@ -1137,6 +1205,7 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,/*{-{*/
   if (!L->isLoopSimplifyForm()) { 
     DEBUG(
         dbgs() << "  Not unrolling loop which is not in loop-simplify form.\n");
+    NotSimplified++;
     return false;
   }
 
@@ -1169,11 +1238,71 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,/*{-{*/
   if (Preheader){
     if(Value* head = dyn_cast<Value>(L->getHeader())){
 
+      bool isOk=true;
+      bool hasExitInParent=false;
+      BasicBlock* exitBlock;
+
       // Check if there is not several exitblock here and abort if so
       // We will consider this case in the futur! TODO
       if(!L->getExitBlock()){
-        DEBUG(dbgs() <<"WARN: severals exitBlock → Abort\n");
+        DEBUG(dbgs() <<"WARN: severals exitBlock!\n");
         NumLoopsManyExitB++;
+
+        SmallVector<BasicBlock*,32> exitBlocks;        
+        BSet exits;
+
+        L->getExitBlocks(exitBlocks);
+        DEBUG(dbgs() <<"ExitBlocks:\n");
+        for(BasicBlock* EB : exitBlocks){
+          DEBUG(dbgs() << EB->getName() <<"\n");
+          exits.insert(EB);
+        }
+        
+        /* //↓ TEST TO REMOVE↓ */
+        /* SmallVector<Loop*,32> parentLoops; */
+        /* Loop* LL = L; */
+        /* DEBUG(dbgs() <<"Loops for depth:" << L->getLoopDepth() << "\n"); */
+        /* for(unsigned int i=1 ; i<L->getLoopDepth(); i++){ */
+        /*   DEBUG(LL->dump()); */
+        /*   parentLoops.push_back(LL); */
+        /*   LL = LL->getParentLoop(); */
+        /* } */
+        /* Loop* lastParent = LL; */
+        /* DEBUG(dbgs() <<"LastParent is:\n"); */
+        /* DEBUG(lastParent->dump()); */
+        /* //↑ TEST TO REMOVE↑ */
+
+        if(exits.size()==1){
+          DEBUG(dbgs() <<"All the same exit…\n");
+          exitBlock = *(exits.begin());
+          hasExitInParent=true;
+        } else {
+          Loop* LL = L;
+          for(unsigned int i=1 ; i<L->getLoopDepth(); i++){
+            LL = LL->getParentLoop();
+          }
+          Loop* lastParent = LL;
+          DEBUG(dbgs() <<"LastParent is:\n");
+          DEBUG(dbgs() << lastParent->getName() <<"\n");
+          for (auto EB = exits.begin(), E = exits.end(); EB != E; ++EB) {
+            BasicBlock* B = *EB;
+            bool contains=false;
+            /* for(auto CLI = parentLoops.rbegin(), CE = parentLoops.rend(); */
+            /*     CLI!=CE; ++CLI){ */
+            /*   Loop* CL = *CLI; */
+            if(lastParent->contains(B) || lastParent->getExitBlock()==B)
+              contains=true;
+            /* } */
+            if(!contains){
+              isOk=false;
+              hasExitInParent=true;
+              break;
+            }
+          }
+        }
+      }
+
+      if(!isOk){
         if (L->getParentLoop() && !DeleteAST)
           LoopToAliasSetMap[L] = CurAST;
         else
@@ -1181,7 +1310,6 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,/*{-{*/
         return false;
       }
 
-      DEBUG(dbgs() <<"INFO: ExitBlock = " << L->getExitBlock()->getName() <<"\n");
 
       /* if(!L->getLoopLatch()){ */
       /*   DEBUG(dbgs() <<"WARN: severals Latchs → Abort\n"); */
@@ -1196,7 +1324,12 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,/*{-{*/
       /* DEBUG(dbgs() <<"INFO: Latch = " << L->getLoopLatch()->getName() <<"\n"); */
 
       Chunk* loopChunk = new Chunk(L->getHeader()->getName());
-      loopChunk->setEnd(L->getExitBlock());
+      if(!hasExitInParent){
+        DEBUG(dbgs() <<"INFO: ExitBlock = " << exitBlock <<"\n");
+        loopChunk->setEnd(exitBlock);
+      }
+      else 
+        loopChunk->setAnchor(true);
       loopChunk->setStart(L->getHeader());
 
       // We place them in the map of maps with the value of the header as a key
@@ -1221,7 +1354,7 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,/*{-{*/
           delete CurAST;
         return false;
       }
-
+      NumOK++;
       loopChunk->setRel(RL);
       /* DEBUG(RL->dump(dbgs())); */
 
@@ -1230,7 +1363,7 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,/*{-{*/
       int maxDeg = getDegMax(loopChunk->getMapDeg());
       DEBUG(dbgs() <<"*********************maxDeg******************\n");
       DEBUG(dbgs() << maxDeg <<"\n");
-      if(maxDeg!=-1){
+      if(maxDeg!=-1 && !hasExitInParent){
         DEBUG(dbgs() <<"Something has to be peeled…\n");
         // - For each deg d from 0 to degMax:
         //    - Create a CFG with all commands in the loop with deg rather than d
@@ -1242,8 +1375,12 @@ bool LoopInvariantCodeMotion::runOnLoop(Loop *L, AliasAnalysis *AA,/*{-{*/
         if(Changed)
           DEBUG(dbgs() <<"PEELED!\n");
         else DEBUG(dbgs() <<"IMPOSSIBLE TO PEEL!\n");
+      } else{
+        loopChunk->setPeeled(true);
       }
     }
+  } else {
+    NoPreHeader++;
   }
   if (L->getParentLoop() && !DeleteAST)
     LoopToAliasSetMap[L] = CurAST;

@@ -1,4 +1,4 @@
-LLVM_BUILD="../llvm_build"
+LLVM_BUILD="../LLVM_BUILD"
 tmpIR="./test/llvmIR/tmp.ll"
 licmIR="./test/llvmIR/tmpLICM.ll"
 O3IR="./test/llvmIR/tmpO3.ll"

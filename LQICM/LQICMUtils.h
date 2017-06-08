@@ -52,15 +52,27 @@ using namespace std;
 
 STATISTIC(NumQuasiInvariants, "Number of instructions with deg != -1");
 STATISTIC(NumLoops, "Number of time runOnLoop is performed…");
-STATISTIC(NumLoopsManyExitB, "Number Loop with severals ExitBlock → LQICM Aborted…");
+STATISTIC(DepthLoop, "Sum of depth of loops");
+STATISTIC(NotSimplified, "Number of loop not in simplified form");//
+STATISTIC(NumLoopsManyExitB, "Number Loop with severals ExitBlock → LQICM Aborted…");//
+STATISTIC(NumLoopsWithExitNotInHead, "Number of Loop with Exit not in head");
 STATISTIC(NumLoopsManyLatch, "Number Loop with severals Latch → LQICM Aborted…");
 STATISTIC(NumQuasiInvariantsBlocks, "Number of innerBlocks with deg != -1");
 STATISTIC(SumDegQIBlocks, "Sum of all degrees for chunks != -1");
 STATISTIC(SumDegs, "Sum of all degrees != -1");
-STATISTIC(NumError, "Number of loops not analyzed…");
+STATISTIC(NumError, "Number of erro reported…");//
+STATISTIC(NumOK, "Number of Well Analyzed Loop…");
+STATISTIC(NoPreHeader, "Number of loop without PreHeader…");
+STATISTIC(ErrorInDep, "Number of aborted Dependence Graph computation…");
+STATISTIC(EndUnexpected, "Number of End block unexpected…");
+STATISTIC(BBNotInCurrentLoop, "Number of BB found not in the current Loop…");
+STATISTIC(InnerLoopNotAnalysed, "Number of with inner loop aborted…");
+STATISTIC(ForkWithTwoBreak, "Number of branch with 2 jumps oustide…");
+STATISTIC(BranchWithBreakUnexpected, "Number of branch with unexpected break");
+STATISTIC(WeirdTermination, "Number of weird termination");
 
 // Relation object TODO should be somewhere else…
-namespace llvm {/*{-{*/
+namespace llvm {
 
   enum DepType { 
     EMPT, // (0,0)
@@ -586,7 +598,7 @@ namespace llvm {/*{-{*/
       return comp;
     }
 
-    Relation* addDependencies(VSet in, VSet out){
+    void addDependencies(VSet in, VSet out){
       for(Value* i : in){
         for(Value* o : out){
           Arrow A = make_pair(i,o);
@@ -1021,8 +1033,11 @@ namespace llvm {/*{-{*/
         SumDegs+=(*mapDeg)[I];
       }
       if((*mapChunk)[I]){
-        DEBUG(dbgs() << "\n\t↑ It's the beginning of an inner Chunk with end "
+        if(((*mapChunk)[I])->getEnd())
+          DEBUG(dbgs() << "\n\t↑ It's the beginning of an inner Chunk with end "
               << ((*mapChunk)[I])->getEnd()->getName() << " ↑ ");
+        else
+          DEBUG(dbgs() << "\n\t↑ It's the beginning of an inner Chunk with many ends ↑ ");
         // If deg is not infinty and it doesn't contains a anchor
         if((*mapDeg)[I] != -1 && !(*mapChunk)[I]->isAnchor()){
           SumDegQIBlocks+=(*mapDeg)[I];
@@ -1214,6 +1229,7 @@ namespace llvm {/*{-{*/
 
     bool runOnLoop(Loop *L, LPPassManager &LPM) override {
       NumLoops++;
+      DepthLoop+=L->getLoopDepth();
       if (skipLoop(L)) {
         // If we have run LQICM on a previous loop but now we are skipping
         // (because we've hit the opt-bisect limit), we need to clear the
@@ -1985,7 +2001,7 @@ namespace llvm {/*{-{*/
     return true;
   }
 
-}/*}-}*/
+}
 
 #endif
 
